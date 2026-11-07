@@ -1,0 +1,36 @@
+# Ubuntu ARM64 — lima.sh 的設定 (Lima + Virtualization.framework)
+vmType: vz
+arch: aarch64
+cpus: 4
+memory: 4GiB
+disk: 64GiB
+
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-arm64.img"
+    arch: aarch64
+
+# 專案放在 VM 內部 I/O 最快; 只掛載 share/ 用來和 Mac 交換檔案 (可寫)
+# location 由 lima.sh 用 --set 覆蓋成 repo 的 share/ 絕對路徑
+# ({{.Dir}} 是實例目錄 ~/.lima/<name>, 不是這個檔所在的目錄, 所以不能用相對路徑)
+mounts:
+  - location: "/tmp/lima-share-placeholder"
+    mountPoint: /mnt/share
+    writable: true
+
+# 音訊: 使用 VZ 的 virtio-sound, 直接輸出到 Mac 喇叭 (Lima 版本需支援; 不行就改走 PulseAudio over TCP)
+audio:
+  device: vz
+
+# GUI: ssh -X 轉發到 Mac 的 XQuartz (limactl shell 不轉發 X11, 要用 ssh -F)
+ssh:
+  forwardX11: true
+  forwardX11Trusted: true
+
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y python3-tk x11-apps pulseaudio-utils alsa-utils pipewire-pulse
