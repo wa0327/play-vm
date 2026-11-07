@@ -1,6 +1,6 @@
 #!/bin/bash
 # 把 Ubuntu 的 vmlinuz (EFI zboot 封裝) 解成可直接開機的 arm64 Image (給 vfkit.sh / qemu.sh 的 --direct 用)
-# 用法:  ./kernel.sh <vmlinuz> [輸出檔]     輸出預設為 <vmlinuz 所在資料夾>/Image
+# 用法:  ./_kernel.sh <vmlinuz> [輸出檔]     輸出預設為 <vmlinuz 所在資料夾>/Image
 # 取得 vmlinuz / initrd (VM 裡; /boot/vmlinuz-* 只有 root 能讀, 要先 sudo cp 出來):
 #   sudo cp /boot/vmlinuz /tmp/vmlinuz && sudo cp /boot/initrd.img /tmp/initrd.img && sudo chmod 644 /tmp/vmlinuz /tmp/initrd.img
 #   scp <使用者>@<VM>:/tmp/vmlinuz <使用者>@<VM>:/tmp/initrd.img <OS>/<工具>/
