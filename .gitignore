@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# 磁碟映像與安裝光碟 (很大, 可重新下載或重新建立, 不進版本控制)
+*.iso
+*.qcow2
+*.img
+*.raw
+
+# UEFI 變數檔 (每台 VM 各自一份, 首次開機自動建立)
+*.fd
+
+# 執行期狀態與暫存
+*.pid
+*.sock
+*.log
+*.tmp
+tpm/
+
+# 共享資料夾: 只保留資料夾本身, 裡面是個人資料, 不簽入
+share/*
+!share/.gitkeep
