@@ -6,7 +6,8 @@
 #           install   第一次安裝 (掛載安裝光碟; 磁碟不存在時自動建立稀疏 raw 檔)
 #           ip        查這台 VM 目前的 IP (從 /var/db/dhcpd_leases, 用 vfkit.conf 的 MAC)
 # 選項:  --res 寬x高   解析度, 例如 --res 1440x900 (預設見 vfkit.conf)
-#        --headless    不開視窗 (用 ssh 連線)
+#        --headless    不開視窗 (用 ssh 連線; 搭配 --direct 時終端機會直接接上 VM 的主控台)
+#        --direct      直接載入 kernel 開機, 略過 UEFI/GRUB (要在 vfkit.conf 設 KERNEL/INITRD/CMDLINE; kernel 先用 ./kernel.sh 解開)
 #        --dry-run     只印出 vfkit 參數, 不啟動                   -h, --help  顯示說明
 # 各 OS 的差異放在 <os>/vfkit/vfkit.conf, 路徑相對於 <os>/vfkit/ (共用的安裝光碟在上一層 ../)。
 # 注意: vfkit 只支援 raw 磁碟 (不支援 qcow2); 在 VM 裡正常關機, 不要直接 Ctrl+C (等於斷電)。
@@ -22,12 +23,13 @@ usage() {
 }
 
 # --- 參數解析 (選項可放在任何位置; 第一個非選項是 <os>, 第二個是 [模式]) ---
-OPT_HEADLESS=0; OPT_DRY=0; OPT_RES=""
+OPT_HEADLESS=0; OPT_DRY=0; OPT_RES=""; OPT_DIRECT=0
 POS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --headless) OPT_HEADLESS=1 ;;
     --dry-run)  OPT_DRY=1 ;;
+    --direct)   OPT_DIRECT=1 ;;
     --res)      shift; OPT_RES="${1:-}" ;;
     --res=*)    OPT_RES="${1#--res=}" ;;
     -h|--help)  usage 0 ;;
@@ -56,6 +58,7 @@ CPUS=4; MEMORY_MB=4096
 XRES=1920; YRES=1200
 MAC=""
 SHARES=()
+KERNEL=""; INITRD=""; CMDLINE="console=hvc0 quiet"   # 只在 --direct 使用; 開機真實磁碟時要在 vfkit.conf 加 root=... (參數內不能有逗號)
 cd "$OS/vfkit"
 # shellcheck disable=SC1091
 source ./vfkit.conf
@@ -75,6 +78,15 @@ if [ "$MODE" = "ip" ]; then
 fi
 
 case "$DISK_BUS" in virtio-blk|nvme) ;; *) echo "$OS/vfkit/vfkit.conf 的 DISK_BUS 只能是 virtio-blk 或 nvme (目前: $DISK_BUS)" >&2; exit 1 ;; esac
+
+if [ "$OPT_DIRECT" = "1" ]; then
+  [ "$MODE" != "install" ] || { echo "--direct 不能搭配 install (安裝要走 UEFI 才能從光碟開機)" >&2; exit 1; }
+  [ -n "$KERNEL" ] && [ -n "$INITRD" ] || { echo "--direct 需要在 $OS/vfkit/vfkit.conf 設定 KERNEL 和 INITRD (kernel 先用 ./kernel.sh 解開)" >&2; exit 1; }
+  case "$CMDLINE" in *,*) echo "CMDLINE 不能含逗號 (vfkit 以逗號分隔選項): $CMDLINE" >&2; exit 1 ;; esac
+  if [ "$OPT_DRY" != "1" ]; then
+    for f in "$KERNEL" "$INITRD"; do [ -f "$f" ] || { echo "找不到 $f" >&2; exit 1; }; done
+  fi
+fi
 
 PIDFILE=vfkit.pid
 DRY="$OPT_DRY"
@@ -98,10 +110,12 @@ if [ "$MODE" = "install" ]; then
 fi
 
 # --- 組參數 ---
+BOOTLOADER="efi,variable-store=$VARS,create"
+if [ "$OPT_DIRECT" = "1" ]; then BOOTLOADER="linux,kernel=$KERNEL,initrd=$INITRD,cmdline=$CMDLINE"; fi
 ARGS=(
   --cpus "$CPUS"
   --memory "$MEMORY_MB"
-  --bootloader "efi,variable-store=$VARS,create"
+  --bootloader "$BOOTLOADER"
   --device "$DISK_BUS,path=$DISK"
 )
 NET="virtio-net,nat"
@@ -128,6 +142,8 @@ if [ "$OPT_HEADLESS" != "1" ]; then
     --gui
   )
 fi
+# 直接開機沒有 UEFI 畫面, 無視窗時把終端機接上 VM 的主控台 (kernel 要有 console=hvc0; 需要真的終端機, 管線不行)
+if [ "$OPT_DIRECT" = "1" ] && [ "$OPT_HEADLESS" = "1" ]; then ARGS+=(--device virtio-serial,stdio); fi
 ARGS+=(--pidfile "$PIDFILE")
 
 if [ -n "$MAC" ] && [ "$DRY" != "1" ]; then
