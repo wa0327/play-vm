@@ -1,0 +1,15 @@
+#cloud-config
+# Ubuntu ARM64 — orbstack.sh 的 cloud-init (OrbStack 機器建立時自動套用)
+package_update: true
+# OrbStack 內建的 ssh 入口 (ubuntu@orb) 不轉發 X11, GUI 要連客體自己的 sshd:
+#   ssh -X <使用者>@<機器>.orb.local   (需先把公鑰放進客體 ~/.ssh/authorized_keys)
+# 音訊: 客體有 virtio-snd 音效卡, 不用音訊伺服器, mpg123 -o alsa 即可播放
+packages:
+  - openssh-server   # X11 轉發需要客體自己的 sshd
+  - xauth            # ssh -X 需要
+  - python3-tk
+  - x11-apps
+  - x11-utils        # xdpyinfo
+  - mpg123           # 播 mp3 (mpg123 -o alsa <檔案>)
+  - pulseaudio-utils
+  - alsa-utils
