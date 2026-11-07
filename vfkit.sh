@@ -5,9 +5,12 @@
 #   模式    (空)      正常開機 (有圖形視窗)
 #           install   第一次安裝 (掛載安裝光碟; 磁碟不存在時自動建立稀疏 raw 檔)
 #           ip        查這台 VM 目前的 IP (從 /var/db/dhcpd_leases, 用 vfkit.conf 的 MAC)
+#           extract   從磁碟離線取出 kernel/initrd/開機參數, 存到 <os>/vfkit/direct/ (給 --direct 用; 要先 brew install e2fsprogs; VM 要先關機)
 # 選項:  --res 寬x高   解析度, 例如 --res 1440x900 (預設見 vfkit.conf)
 #        --headless    不開視窗 (用 ssh 連線; 搭配 --direct 時終端機會直接接上 VM 的主控台)
-#        --direct      直接載入 kernel 開機, 略過 UEFI/GRUB (要在 vfkit.conf 設 KERNEL/INITRD/CMDLINE; kernel 先用 ./kernel.sh 解開)
+#        --direct      直接載入 kernel 開機, 略過 UEFI/GRUB (先跑一次 extract; 或在 vfkit.conf 自行設 KERNEL/INITRD/CMDLINE)
+#                      流程: ./vfkit.sh <os> install  ->  ./vfkit.sh <os> extract  ->  ./vfkit.sh <os> --direct
+#                      VM 裡升級 kernel 後要重跑 extract, 否則 --direct 還是開舊的 kernel
 #        --dry-run     只印出 vfkit 參數, 不啟動                   -h, --help  顯示說明
 # 各 OS 的差異放在 <os>/vfkit/vfkit.conf, 路徑相對於 <os>/vfkit/ (共用的安裝光碟在上一層 ../)。
 # 注意: vfkit 只支援 raw 磁碟 (不支援 qcow2); 在 VM 裡正常關機, 不要直接 Ctrl+C (等於斷電)。
@@ -46,7 +49,7 @@ if [ ! -f "$OS/vfkit/vfkit.conf" ]; then
   echo "找不到 $OS/vfkit/vfkit.conf ($OS 沒有 vfkit 這條路; 例如 Windows 不適用 Virtualization.framework)" >&2
   usage
 fi
-case "$MODE" in ""|install|ip) ;; *) echo "未知模式: $MODE" >&2; usage ;; esac
+case "$MODE" in ""|install|ip|extract) ;; *) echo "未知模式: $MODE" >&2; usage ;; esac
 
 # --- 預設值 (vfkit.conf 可覆蓋) ---
 NAME="$OS"
@@ -58,7 +61,8 @@ CPUS=4; MEMORY_MB=4096
 XRES=1920; YRES=1200
 MAC=""
 SHARES=()
-KERNEL=""; INITRD=""; CMDLINE="console=hvc0 quiet"   # 只在 --direct 使用; 開機真實磁碟時要在 vfkit.conf 加 root=... (參數內不能有逗號)
+DIRECT_DIR=direct                  # extract 的輸出資料夾 (相對於 <os>/vfkit/): Image、initrd.img、cmdline
+KERNEL=""; INITRD=""; CMDLINE=""   # 只在 --direct 使用; 沒設定就用 $DIRECT_DIR 裡 extract 取出的 (vfkit.conf 設了就以 conf 為準; CMDLINE 不能含逗號)
 cd "$OS/vfkit"
 # shellcheck disable=SC1091
 source ./vfkit.conf
@@ -77,11 +81,30 @@ if [ "$MODE" = "ip" ]; then
   exit 0
 fi
 
+# --- extract: 不開機, 直接從磁碟離線取出 kernel / initrd / 開機參數 (給 --direct 用) ---
+# 實作在共用的 _extract.sh (qemu.sh 也用它); 這裡的磁碟是 raw (直接讀, 不用轉換), 主控台是 virtio-serial (hvc0)。
+# raw 磁碟沒有檔案鎖, VM 還在跑時讀到的內容可能不一致, 所以先擋下。
+if [ "$MODE" = "extract" ]; then
+  [ -f "$DISK" ] || { echo "找不到磁碟 $OS/vfkit/$DISK; 第一次請先  ./vfkit.sh $OS install" >&2; exit 1; }
+  if [ -f vfkit.pid ] && kill -0 "$(cat vfkit.pid)" 2>/dev/null; then
+    echo "$NAME 還在執行 (pid $(cat vfkit.pid)), 請先在 VM 裡關機再 extract" >&2; exit 1
+  fi
+  "$ROOT/_extract.sh" raw "$PWD/$DISK" "$PWD/$DIRECT_DIR" hvc0
+  echo "下一步: ./vfkit.sh $OS --direct   (VM 裡升級 kernel 後要重跑  ./vfkit.sh $OS extract)"
+  exit 0
+fi
+
 case "$DISK_BUS" in virtio-blk|nvme) ;; *) echo "$OS/vfkit/vfkit.conf 的 DISK_BUS 只能是 virtio-blk 或 nvme (目前: $DISK_BUS)" >&2; exit 1 ;; esac
 
 if [ "$OPT_DIRECT" = "1" ]; then
   [ "$MODE" != "install" ] || { echo "--direct 不能搭配 install (安裝要走 UEFI 才能從光碟開機)" >&2; exit 1; }
-  [ -n "$KERNEL" ] && [ -n "$INITRD" ] || { echo "--direct 需要在 $OS/vfkit/vfkit.conf 設定 KERNEL 和 INITRD (kernel 先用 ./kernel.sh 解開)" >&2; exit 1; }
+  # vfkit.conf 沒設定的項目, 用 extract 取出的檔案補上
+  if [ -z "$KERNEL" ] && [ -f "$DIRECT_DIR/Image" ]; then KERNEL="$DIRECT_DIR/Image"; fi
+  if [ -z "$INITRD" ] && [ -f "$DIRECT_DIR/initrd.img" ]; then INITRD="$DIRECT_DIR/initrd.img"; fi
+  if [ -z "$CMDLINE" ]; then
+    if [ -f "$DIRECT_DIR/cmdline" ]; then CMDLINE="$(cat "$DIRECT_DIR/cmdline")"; else CMDLINE="console=hvc0 quiet"; fi
+  fi
+  [ -n "$KERNEL" ] && [ -n "$INITRD" ] || { echo "--direct 找不到 kernel/initrd: 先跑  ./vfkit.sh $OS extract  (或在 $OS/vfkit/vfkit.conf 設定 KERNEL 和 INITRD)" >&2; exit 1; }
   case "$CMDLINE" in *,*) echo "CMDLINE 不能含逗號 (vfkit 以逗號分隔選項): $CMDLINE" >&2; exit 1 ;; esac
   if [ "$OPT_DRY" != "1" ]; then
     for f in "$KERNEL" "$INITRD"; do [ -f "$f" ] || { echo "找不到 $f" >&2; exit 1; }; done
