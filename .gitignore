@@ -24,3 +24,6 @@ tpm/
 # 共享資料夾: 只保留資料夾本身, 裡面是個人資料, 不簽入
 share/*
 !share/.gitkeep
+
+# --direct 用的 kernel/initrd (./qemu.sh <os> extract 從磁碟取出, 很大且可重新產生, 不進版本控制)
+direct/
