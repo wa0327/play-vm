@@ -1,0 +1,143 @@
+#!/bin/bash
+# vfkit (Apple Virtualization.framework) 啟動器
+# 用法:  ./vfkit.sh <os> [模式] [選項]
+#   <os>    OS 目錄名稱 (該目錄下要有 vfkit/vfkit.conf), 例如 ubuntu
+#   模式    (空)      正常開機 (有圖形視窗)
+#           install   第一次安裝 (掛載安裝光碟; 磁碟不存在時自動建立稀疏 raw 檔)
+#           ip        查這台 VM 目前的 IP (從 /var/db/dhcpd_leases, 用 vfkit.conf 的 MAC)
+# 選項:  --res 寬x高   解析度, 例如 --res 1440x900 (預設見 vfkit.conf)
+#        --headless    不開視窗 (用 ssh 連線)
+#        --dry-run     只印出 vfkit 參數, 不啟動                   -h, --help  顯示說明
+# 各 OS 的差異放在 <os>/vfkit/vfkit.conf, 路徑相對於 <os>/vfkit/ (共用的安裝光碟在上一層 ../)。
+# 注意: vfkit 只支援 raw 磁碟 (不支援 qcow2); 在 VM 裡正常關機, 不要直接 Ctrl+C (等於斷電)。
+set -euo pipefail
+cd "$(dirname "$0")"
+ROOT="$PWD"
+
+usage() {
+  sed -n '2,/^set -euo/p' "$ROOT/vfkit.sh" | sed '$d' | sed 's/^# \{0,1\}//' >&2
+  echo "可用的 OS:" >&2
+  for c in "$ROOT"/*/vfkit/vfkit.conf; do [ -f "$c" ] && echo "  $(basename "$(dirname "$(dirname "$c")")")" >&2; done
+  exit "${1:-1}"
+}
+
+# --- 參數解析 (選項可放在任何位置; 第一個非選項是 <os>, 第二個是 [模式]) ---
+OPT_HEADLESS=0; OPT_DRY=0; OPT_RES=""
+POS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --headless) OPT_HEADLESS=1 ;;
+    --dry-run)  OPT_DRY=1 ;;
+    --res)      shift; OPT_RES="${1:-}" ;;
+    --res=*)    OPT_RES="${1#--res=}" ;;
+    -h|--help)  usage 0 ;;
+    -*)         echo "未知選項: $1" >&2; usage ;;
+    *)          POS+=("$1") ;;
+  esac
+  shift
+done
+if [ -n "$OPT_RES" ] && ! [[ "$OPT_RES" =~ ^[0-9]+x[0-9]+$ ]]; then echo "--res 格式要像 1920x1200 (目前: $OPT_RES)" >&2; exit 1; fi
+OS="${POS[0]:-}"; MODE="${POS[1]:-}"
+[ -n "$OS" ] || usage
+OS="${OS%/}"
+if [ ! -f "$OS/vfkit/vfkit.conf" ]; then
+  echo "找不到 $OS/vfkit/vfkit.conf ($OS 沒有 vfkit 這條路; 例如 Windows 不適用 Virtualization.framework)" >&2
+  usage
+fi
+case "$MODE" in ""|install|ip) ;; *) echo "未知模式: $MODE" >&2; usage ;; esac
+
+# --- 預設值 (vfkit.conf 可覆蓋) ---
+NAME="$OS"
+DISK=disk.img; DISK_SIZE=64G
+DISK_BUS=virtio-blk                # virtio-blk (Linux) | nvme (Windows 內建驅動)
+VARS=vars.fd
+INSTALL_ISO=""
+CPUS=4; MEMORY_MB=4096
+XRES=1920; YRES=1200
+MAC=""
+SHARES=()
+cd "$OS/vfkit"
+# shellcheck disable=SC1091
+source ./vfkit.conf
+if [ -n "$OPT_RES" ]; then XRES="${OPT_RES%x*}"; YRES="${OPT_RES#*x}"; fi   # --res 優先於 vfkit.conf
+
+# macOS 的 /var/db/dhcpd_leases 會省略 MAC 每一段的前導零 (52:54:00:aa:bb:01 -> 52:54:0:aa:bb:1)
+SHORT_MAC=""
+if [ -n "$MAC" ]; then SHORT_MAC="$(echo "$MAC" | tr 'A-F' 'a-f' | sed -E 's/(^|:)0+([0-9a-f])/\1\2/g')"; fi
+
+# --- ip 模式: 從 DHCP 租約找這台 VM 的 IP (取最後一筆) ---
+if [ "$MODE" = "ip" ]; then
+  [ -n "$SHORT_MAC" ] || { echo "$OS/vfkit/vfkit.conf 沒有設定 MAC, 無法查 IP" >&2; exit 1; }
+  ip="$(awk -v mac="1,$SHORT_MAC" 'BEGIN{RS="}"} index($0, "hw_address=" mac) {if (match($0, /ip_address=[0-9.]+/)) last=substr($0, RSTART+11, RLENGTH-11)} END{print last}' /var/db/dhcpd_leases 2>/dev/null)"
+  [ -n "$ip" ] || { echo "租約裡找不到 $MAC (VM 還沒開機, 或還沒取得 IP)" >&2; exit 1; }
+  echo "$ip"
+  exit 0
+fi
+
+case "$DISK_BUS" in virtio-blk|nvme) ;; *) echo "$OS/vfkit/vfkit.conf 的 DISK_BUS 只能是 virtio-blk 或 nvme (目前: $DISK_BUS)" >&2; exit 1 ;; esac
+
+PIDFILE=vfkit.pid
+DRY="$OPT_DRY"
+
+# --- 防止同一個磁碟被兩個 VM 同時使用 ---
+if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+  echo "$NAME 已經在執行 (pid $(cat "$PIDFILE")), 不重複啟動" >&2
+  exit 1
+fi
+
+# --- 磁碟 (raw, 稀疏檔) ---
+if [ ! -f "$DISK" ]; then
+  if [ "$MODE" = "install" ]; then
+    if [ "$DRY" = "1" ]; then echo "(--dry-run: 會建立 $DISK_SIZE 稀疏磁碟 $OS/vfkit/$DISK)" >&2; else truncate -s "$DISK_SIZE" "$DISK"; fi
+  else
+    echo "找不到磁碟 $OS/vfkit/$DISK; 第一次請用  ./vfkit.sh $OS install" >&2; exit 1
+  fi
+fi
+if [ "$MODE" = "install" ]; then
+  [ -n "$INSTALL_ISO" ] && [ -f "$INSTALL_ISO" ] || { echo "找不到安裝光碟: ${INSTALL_ISO:-(INSTALL_ISO 未設定)}" >&2; exit 1; }
+fi
+
+# --- 組參數 ---
+ARGS=(
+  --cpus "$CPUS"
+  --memory "$MEMORY_MB"
+  --bootloader "efi,variable-store=$VARS,create"
+  --device "$DISK_BUS,path=$DISK"
+)
+NET="virtio-net,nat"
+if [ -n "$MAC" ]; then NET="$NET,mac=$MAC"; fi
+ARGS+=(--device "$NET" --device virtio-rng)
+
+# 共享資料夾 (virtio-fs; vfkit 沒有唯讀選項): SHARES=("標籤:路徑"), VM 內 mount -t virtiofs <標籤> <掛載點>
+for entry in ${SHARES[@]+"${SHARES[@]}"}; do
+  tag="${entry%%:*}"; path="${entry#*:}"
+  if [ ! -d "$path" ]; then echo "略過共享 $tag: 資料夾不存在 ($path)" >&2; continue; fi
+  ARGS+=(--device "virtio-fs,sharedDir=$path,mountTag=$tag")
+  echo "共享: $tag <- $path   (VM 內: sudo mount -t virtiofs $tag /mnt/$tag)" >&2
+done
+
+if [ "$MODE" = "install" ]; then
+  ARGS+=(--device "usb-mass-storage,path=$INSTALL_ISO,readonly")
+fi
+
+if [ "$OPT_HEADLESS" != "1" ]; then
+  ARGS+=(
+    --device virtio-input,keyboard
+    --device virtio-input,pointing
+    --device "virtio-gpu,width=$XRES,height=$YRES"
+    --gui
+  )
+fi
+ARGS+=(--pidfile "$PIDFILE")
+
+if [ -n "$MAC" ] && [ "$DRY" != "1" ]; then
+  echo "提示: 開機後用  ./vfkit.sh $OS ip  查 IP" >&2
+fi
+
+if [ "$DRY" = "1" ]; then
+  printf '%s\n' vfkit "${ARGS[@]}"
+  exit 0
+fi
+
+trap 'rm -f -- vfkit.pid' EXIT
+vfkit "${ARGS[@]}"
