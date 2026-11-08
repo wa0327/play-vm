@@ -21,7 +21,14 @@ fi
 cat > "$BIN" <<'EOF'
 #!/bin/bash
 # 由 guest/boot-ping.sh 安裝; 開機後送一行 "key=秒數 ..." 給 host。
-host=${BOOT_PING_HOST:-$(ip -4 route show default | awk '{print $3; exit}')}
+# 自己等預設路由出現 (最多 5 秒), 不用 Wants=network-online.target: 拉入 network-online 會讓排在它之後的服務
+# (例如 ubuntu-advantage) 也跟著等網路, 實測把 multi-user 拖慢約 0.1 秒, 量測工具不該改變它要量的東西
+host=${BOOT_PING_HOST:-}
+for _ in $(seq 50); do
+  [ -n "$host" ] && break
+  host=$(ip -4 route show default 2>/dev/null | awk '{print $3; exit}')
+  [ -n "$host" ] || sleep 0.1
+done
 port=${BOOT_PING_PORT:-7777}
 [ -n "$host" ] || exit 0
 t() { local v; v=$(systemctl show "$1" -P ActiveEnterTimestampMonotonic 2>/dev/null); awk -v v="${v:-0}" 'BEGIN{printf "%.3f", v/1000000}'; }
@@ -40,11 +47,11 @@ chmod 755 "$BIN"
 cat > "$UNIT" <<'EOF'
 [Unit]
 Description=Report boot milestones to the host (boot timing, see boottime.sh)
-After=multi-user.target graphical.target network-online.target
+After=multi-user.target graphical.target
 
 [Service]
 Type=oneshot
-ExecStart=-/usr/bin/timeout 2 /usr/local/bin/boot-ping
+ExecStart=-/usr/bin/timeout 8 /usr/local/bin/boot-ping
 
 [Install]
 WantedBy=multi-user.target
