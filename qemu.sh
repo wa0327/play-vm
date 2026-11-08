@@ -8,14 +8,17 @@
 #           net       正常開機 + 驅動光碟 (補裝/重裝 virtio 驅動)
 #           safe      用 ramfb 顯示 (畫面全黑時的退路)
 #           bochs     實驗: bochs-display
-#           extract   從磁碟離線取出 kernel/initrd/開機參數, 存到 <os>/qemu/direct/ (給 --direct 用; 要先 brew install e2fsprogs; VM 要先關機)
+#           extract   從磁碟離線取出 kernel/initrd/開機參數, 存到 <os>/qemu/direct/ (直接開機用; 要先 brew install e2fsprogs; VM 要先關機)
 # 選項:  --res 寬x高   解析度, 例如 --res 1440x900 (預設見 qemu.conf)
 #        --zoom        縮放視窗         --mic       加麥克風 (macOS 會詢問權限)
 #        --no-share    這次不共享資料夾   --tpm       啟用軟體 TPM (目前 HVF 下會當掉)
-#        --headless    不開視窗 (ssh / X11 轉發用; 關機請在 VM 裡 sudo poweroff)
-#        --direct      直接載入 kernel 開機, 略過 UEFI/GRUB, 也不用 initrd (先跑一次 extract; 或在 qemu.conf 自行設 KERNEL/ROOTDEV; 開機參數的底設 CMDLINE; 要用 initrd 就設 INITRD)
-#                      流程: ./qemu.sh <os> install  ->  ./qemu.sh <os> extract  ->  ./qemu.sh <os> --direct
-#                      VM 裡升級 kernel 後要重跑 extract, 否則 --direct 還是開舊的 kernel
+#        --display     開視窗 (-display cocoa) 並加顯示卡 (virtio-gpu); guest 的 tty0/tty1 顯示在視窗
+#                      不加 --display 就沒有視窗。序列埠 (guest 的 ttyAMA0) 一律接到這個終端機 (-serial mon:stdio), 在這裡登入;
+#                      Ctrl-A c 切到 QEMU monitor, Ctrl-A x 結束 (在 guest 按 Ctrl-C 不會殺掉 VM)
+#        --no-direct   強制走 UEFI/GRUB 開機。預設是直接載入 kernel (略過 UEFI/GRUB, 也不用 initrd), 條件: 有 <os>/qemu/direct/ 資料夾
+#                      (只限一般開機, 不加模式)。資料夾由 extract 產生; 也可在 qemu.conf 自行設 KERNEL/ROOTDEV, 開機參數的底設 CMDLINE, 要用 initrd 就設 INITRD
+#                      流程: ./qemu.sh <os> install  ->  ./qemu.sh <os> extract  ->  ./qemu.sh <os>
+#                      VM 裡升級 kernel 後要重跑 extract, 否則還是開舊的 kernel
 #        --dry-run    只印出 QEMU 參數, 不啟動                   -h, --help  顯示說明
 # 各 OS 的差異放在 <os>/qemu/qemu.conf, 路徑相對於 <os>/qemu/ (共用的安裝光碟在上一層 ../)。
 set -euo pipefail
@@ -30,17 +33,21 @@ usage() {
 }
 
 # --- 參數解析 (選項可放在任何位置; 第一個非選項是 <os>, 第二個是 [模式]) ---
-OPT_HEADLESS=0; OPT_ZOOM=off; OPT_MIC=0; OPT_SHARE=1; OPT_TPM=0; OPT_DRY=0; OPT_RES=""; OPT_DIRECT=0
+OPT_DISPLAY=0; OPT_ZOOM=off; OPT_MIC=0; OPT_SHARE=1; OPT_TPM=0; OPT_DRY=0; OPT_RES=""; OPT_DIRECT=0; OPT_NODIRECT=0
 POS=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --headless) OPT_HEADLESS=1 ;;
+    --display)  OPT_DISPLAY=1 ;;
+    --gui)      echo "--gui 已改名為 --display" >&2; exit 1 ;;
+    --tty)      echo "--tty 已移除: 序列埠預設就接到這個終端機" >&2; exit 1 ;;
+    --headless) echo "--headless 已移除: 不加 --display 就是無視窗, 序列埠預設就接到這個終端機" >&2; exit 1 ;;
     --zoom)     OPT_ZOOM=on ;;
     --mic)      OPT_MIC=1 ;;
     --no-share) OPT_SHARE=0 ;;
     --tpm)      OPT_TPM=1 ;;
     --dry-run)  OPT_DRY=1 ;;
-    --direct)   OPT_DIRECT=1 ;;
+    --direct)   echo "--direct 已移除: 有 direct/ 資料夾就預設直接開機 (先跑 extract); 要走 UEFI/GRUB 請加 --no-direct" >&2; exit 1 ;;
+    --no-direct) OPT_NODIRECT=1 ;;
     --res)      shift; OPT_RES="${1:-}" ;;
     --res=*)    OPT_RES="${1#--res=}" ;;
     -h|--help)  usage 0 ;;
@@ -70,7 +77,7 @@ FW_CODE=/opt/homebrew/share/qemu/edk2-aarch64-code.fd
 FW_VARS_TEMPLATE=/opt/homebrew/share/qemu/edk2-arm-vars.fd
 TPM_DIR=tpm
 DIRECT_DIR=direct                 # extract 的輸出資料夾 (相對於 <os>/qemu/): Image、initrd.img、cmdline
-KERNEL=""; INITRD=""; ROOTDEV=""; CMDLINE=""  # 只在 --direct 使用; 沒設定就用 $DIRECT_DIR 裡 extract 取出的 (CMDLINE 是開機參數的底, console= 由腳本附加)
+KERNEL=""; INITRD=""; ROOTDEV=""; CMDLINE=""  # 只在直接開機使用; 沒設定就用 $DIRECT_DIR 裡 extract 取出的 (CMDLINE 是開機參數的底, console= 由腳本附加)
 
 cd "$OS/qemu"
 # shellcheck disable=SC1091
@@ -78,40 +85,48 @@ source ./qemu.conf
 if [ -n "$OPT_RES" ]; then XRES="${OPT_RES%x*}"; YRES="${OPT_RES#*x}"; fi   # --res 優先於 qemu.conf
 
 [ -n "$DISK" ] || { echo "$OS/qemu/qemu.conf 沒有設定 DISK" >&2; exit 1; }
-# --- extract: 不開機, 直接從磁碟離線取出 kernel / initrd / 開機參數 (給 --direct 用) ---
+# 直接開機 (略過 UEFI/GRUB) 是預設: 有 extract 的輸出資料夾 ($DIRECT_DIR) 就直接載入 kernel。
+# 只限一般開機 (沒有 install/drivers/... 模式); --no-direct 強制走 UEFI/GRUB。
+if [ "$OPT_NODIRECT" = "0" ] && [ -z "$MODE" ] && [ -d "$DIRECT_DIR" ]; then
+  OPT_DIRECT=1
+  echo "提示: 找到 $OS/qemu/$DIRECT_DIR/, 直接載入 kernel 開機 (要走 UEFI/GRUB 請加 --no-direct)" >&2
+fi
+# --- extract: 不開機, 直接從磁碟離線取出 kernel / initrd / 開機參數 (直接開機用) ---
 # 實作在共用的 _extract.sh (vfkit.sh 也用它); 這裡的磁碟是 qcow2。
 if [ "$MODE" = "extract" ]; then
   [ -f "$DISK" ] || { echo "找不到磁碟 $OS/qemu/$DISK; 第一次請先  ./qemu.sh $OS install" >&2; exit 1; }
   "$ROOT/_extract.sh" qcow2 "$PWD/$DISK" "$PWD/$DIRECT_DIR"
-  echo "下一步: ./qemu.sh $OS --direct   (VM 裡升級 kernel 後要重跑  ./qemu.sh $OS extract)"
+  echo "下一步: ./qemu.sh $OS   (VM 裡升級 kernel 後要重跑  ./qemu.sh $OS extract)"
   exit 0
 fi
 
 [ -n "$VARS" ] || VARS="vars.fd"
 if [ "$OPT_DIRECT" = "1" ]; then
-  [ "$MODE" != "install" ] || { echo "--direct 不能搭配 install (安裝要走 UEFI 才能從光碟開機)" >&2; exit 1; }
   # qemu.conf 沒設定的項目, 用 extract 取出的檔案補上
   if [ -z "$KERNEL" ] && [ -f "$DIRECT_DIR/Image" ]; then KERNEL="$DIRECT_DIR/Image"; fi
   # 開機參數的底: qemu.conf 的 CMDLINE, 沒設就用 extract 取出的原始值 (GRUB 那行, 一個字都沒改)
   if [ -z "$CMDLINE" ]; then
     if [ -f "$DIRECT_DIR/cmdline" ]; then CMDLINE="$(cat "$DIRECT_DIR/cmdline")"; else CMDLINE="ro"; fi
   fi
-  [ -n "$KERNEL" ] || { echo "--direct 找不到 kernel: 先跑  ./qemu.sh $OS extract  (或在 $OS/qemu/qemu.conf 設定 KERNEL)" >&2; exit 1; }
+  [ -n "$KERNEL" ] || { echo "直接開機找不到 kernel: 先跑  ./qemu.sh $OS extract  (或在 $OS/qemu/qemu.conf 設定 KERNEL; 要走 UEFI/GRUB 請加 --no-direct)" >&2; exit 1; }
   # 預設不用 initrd (kernel 內建 virtio-blk/ext4, 掛根分割不需要它; 省約 1.3 秒); qemu.conf 設了 INITRD 才會載入
   USE_INITRD=0; [ -z "$INITRD" ] || USE_INITRD=1
   if [ "$USE_INITRD" = "0" ]; then
-    [ "$DISK_BUS" = "virtio-blk" ] || { echo "--direct 不用 initrd 只支援 virtio-blk (nvme 驅動是模組); 請在 qemu.conf 設定 INITRD" >&2; exit 1; }
+    [ "$DISK_BUS" = "virtio-blk" ] || { echo "直接開機不用 initrd 只支援 virtio-blk (nvme 驅動是模組); 請在 qemu.conf 設定 INITRD" >&2; exit 1; }
     # 沒有 initrd 就沒人解析 root=UUID=, 改用根分割的 PARTUUID (qemu.conf 可設 ROOTDEV 蓋掉; 預設是 extract 取出的 direct/rootdev)
     if [ -z "$ROOTDEV" ] && [ -f "$DIRECT_DIR/rootdev" ]; then ROOTDEV="$(cat "$DIRECT_DIR/rootdev")"; fi
-    [ -n "$ROOTDEV" ] || { echo "--direct 不用 initrd 需要根分割資訊: 先(重新)跑  ./qemu.sh $OS extract  (或在 qemu.conf 設定 ROOTDEV 或 INITRD)" >&2; exit 1; }
+    [ -n "$ROOTDEV" ] || { echo "直接開機不用 initrd 需要根分割資訊: 先(重新)跑  ./qemu.sh $OS extract  (或在 qemu.conf 設定 ROOTDEV 或 INITRD)" >&2; exit 1; }
   fi
   # 把開機參數的底 (GRUB 原始值) 依這次的開機方式增刪修:
   #   刪: crashkernel= (kdump 在這沒用)、splash / quiet / vt.handoff / $變數 (GRUB 圖形開機畫面用, 直接開機不會展開; quiet 下面重附)、console= (下面重附)
   #   改: 沒有 initrd 時 root= 換成根分割 PARTUUID + rootwait (沒人解析 UUID)
-  #   加: console= 依模式只設一個 (QEMU virt 的名稱固定: ttyAMA0 = PL011 序列埠, tty0 = kernel VT):
-  #         有視窗 (cocoa + virtio-gpu): console=tty0    -> kernel 訊息和 systemd 狀態都顯示在視窗
-  #         --headless (沒有顯示卡):     console=ttyAMA0 -> 顯示在序列埠 (stdio 終端機); tty0 沒人看得到所以不設
-  #       只有一個 console= 時它就是 /dev/console; 沒設的那個裝置 (tty1 或 ttyAMA0) 仍然在, 只是不收 kernel 訊息
+  #   加: console= 與終端機參數 (QEMU virt 的名稱固定: ttyAMA0 = PL011 序列埠, tty0 = kernel VT)。
+  #       kernel 訊息會印到所有 console=; 最後一個才是 /dev/console (systemd 狀態行、緊急 shell 只送到它)。
+  #         預設 (無視窗):  console=ttyAMA0            -> 序列埠, 在這個終端機
+  #         --display:     console=ttyAMA0 console=tty0 -> /dev/console 是視窗, 序列埠上仍有 kernel 訊息和登入
+  #       為什麼要明確給終端機型號與大小: 序列埠上的 systemd 沒被告知時會「問終端機」(XTGETTCAP 查型號、DSR 查大小),
+  #       每次最多等 333 毫秒; 序列埠沒有人回答 (或回答很慢) 就白等 (實測 PID 1 一次 + 各服務的大小查詢, 共約 0.7 秒)。
+  #       console=tty0 時 /dev/console 是 VT, systemd 直接知道是 linux, 不用問。
   _cl=""
   set -f                      # 下面用不加引號的 $CMDLINE 拆字, 關掉萬用字元展開避免 * ? [ 被當檔名
   for _w in $CMDLINE; do
@@ -123,7 +138,22 @@ if [ "$OPT_DIRECT" = "1" ]; then
   done
   set +f
   [ "$USE_INITRD" = "1" ] || _cl=" root=$ROOTDEV rootwait$_cl"
-  if [ "$OPT_HEADLESS" = "1" ]; then _con="console=ttyAMA0"; else _con="console=tty0"; fi
+  _con="console=ttyAMA0"; [ "$OPT_DISPLAY" != "1" ] || _con="console=ttyAMA0 console=tty0"
+  # 序列埠接的是這個終端機: 量它的大小、型號餵給 systemd (只在啟動當下量一次; 取不到 (不是終端機) 就用 24x80 / xterm-256color)
+  _rows=24; _cols=80
+  if _sz="$({ stty size </dev/tty; } 2>/dev/null)" && [ -n "$_sz" ]; then
+    _r="${_sz% *}"; _c="${_sz#* }"
+    case "$_r$_c" in *[!0-9]*|"") ;; *) if [ "$_r" -gt 0 ] && [ "$_c" -gt 0 ]; then _rows="$_r"; _cols="$_c"; fi ;; esac
+  fi
+  case "${TERM:-}" in
+    xterm-256color|xterm|screen-256color|screen|tmux-256color|tmux|linux|vt220) _term="$TERM" ;;
+    *) _term=xterm-256color ;;       # guest 不一定有 host 這個型號的 terminfo
+  esac
+  # 序列埠的 getty (ttyAMA0) 一定要給; /dev/console 也是序列埠時 (沒有 --display) 還要給 console 的
+  _con="$_con systemd.tty.term.ttyAMA0=$_term systemd.tty.rows.ttyAMA0=$_rows systemd.tty.columns.ttyAMA0=$_cols"
+  if [ "$OPT_DISPLAY" != "1" ]; then
+    _con="$_con systemd.tty.term.console=$_term systemd.tty.rows.console=$_rows systemd.tty.columns.console=$_cols"
+  fi
   CMDLINE="${_cl# } quiet $_con"     # quiet: kernel 只印警告以上, systemd 不印 [  OK  ] 狀態行 (少輸出到 console)
   if [ "$OPT_DRY" != "1" ]; then
     for f in "$KERNEL" ${INITRD:+"$INITRD"}; do [ -f "$f" ] || { echo "找不到 $f" >&2; exit 1; }; done
@@ -168,9 +198,15 @@ if [ -n "$MODE" ]; then
   case " $RAMFB_MODES " in *" $MODE "*) GPU_ARGS=(-device ramfb) ;; esac
 fi
 if [ "$MODE" = "bochs" ]; then GPU_ARGS=(-device bochs-display); fi
-# HEADLESS=1: 不開視窗、不加顯示卡 (X11 轉發 / ssh 用; 關機請在 VM 裡 sudo poweroff, 或在這個終端機按 Ctrl+C = 斷電)
+# --display: 開視窗 (cocoa) 並加顯示卡; 沒給就不開視窗、不加顯示卡 (-display 只決定畫面顯示在哪, 顯示卡由 -device 決定)
 DISPLAY_ARG="cocoa,zoom-to-fit=$OPT_ZOOM"
-if [ "$OPT_HEADLESS" = "1" ]; then GPU_ARGS=(); DISPLAY_ARG="none"; fi
+if [ "$OPT_DISPLAY" != "1" ]; then GPU_ARGS=(); DISPLAY_ARG="none"; fi
+# 序列埠一律接到這個終端機: -serial mon:stdio (monitor 疊在同一條線上, Ctrl-A c 切換; 不用純 stdio, 因為純 stdio 時在 guest 按 Ctrl-C 會殺掉整台 VM)
+SERIAL_ARGS=(-serial mon:stdio)
+# 這些模式需要看畫面 (安裝/裝驅動/救援顯示), 沒給 --display 就會是看不到畫面的 VM
+case "$MODE" in install|drivers|net|safe|bochs)
+  [ "$OPT_DISPLAY" = "1" ] || echo "警告: $MODE 模式需要看畫面, 請加 --display" >&2 ;;
+esac
 
 # --- 共享資料夾 (SMB, 只在這次啟動有效) ---
 # 腳本啟動一個只綁 127.0.0.1 的 Samba, 透過 QEMU guestfwd 給 VM; VM 關閉就一併關掉, Mac 上不留任何設定。
@@ -302,15 +338,13 @@ else
   DISK_DEV="virtio-blk-pci,drive=hd0,bootindex=2"
 fi
 
-# --- 開機方式: 預設 UEFI (pflash); --direct 直接載入 kernel ---
+# --- 開機方式: 有 direct/ 資料夾預設直接載入 kernel; --no-direct 或沒有資料夾就走 UEFI (pflash) ---
 BOOT_ARGS=(
   -drive if=pflash,format=raw,unit=0,file="$FW_CODE",readonly=on
   -drive if=pflash,format=raw,unit=1,file="$VARS"
 )
 if [ "$OPT_DIRECT" = "1" ]; then
   BOOT_ARGS=(-kernel "$KERNEL" ${INITRD:+-initrd "$INITRD"} -append "$CMDLINE")
-  # 無視窗時把終端機接上序列埠 (kernel 要有 console=ttyAMA0), 否則看不到任何開機訊息
-  if [ "$OPT_HEADLESS" = "1" ]; then BOOT_ARGS+=(-serial mon:stdio); fi
 fi
 
 QEMU=(qemu-system-aarch64)
@@ -326,6 +360,7 @@ if [ "$OPT_DRY" = "1" ]; then QEMU=(printf '%s\n'); fi
   "${BOOT_ARGS[@]}" \
   ${TPM_ARGS[@]+"${TPM_ARGS[@]}"} \
   ${GPU_ARGS[@]+"${GPU_ARGS[@]}"} \
+  ${SERIAL_ARGS[@]+"${SERIAL_ARGS[@]}"} \
   -device qemu-xhci \
   -device usb-kbd \
   -device usb-tablet \
