@@ -108,10 +108,9 @@ if [ "$OPT_DIRECT" = "1" ]; then
   # 把開機參數的底 (GRUB 原始值) 依這次的開機方式增刪修:
   #   刪: crashkernel= (kdump 在這沒用)、splash / vt.handoff / $變數 (GRUB 圖形開機畫面用, 直接開機不會展開)、console= (下面重附)
   #   改: 沒有 initrd 時 root= 換成根分割 PARTUUID + rootwait (沒人解析 UUID)
-  #   加: console= 依模式附加。QEMU virt 的名稱固定: ttyAMA0 = PL011 序列埠 (virt 一定有), tty0 = kernel VT (有顯示卡才看得到)
-  #       最後一個 console= 才是 /dev/console:
-  #         有視窗: tty0 放最後 (視窗看得到 systemd 狀態和 login)
-  #         無視窗: ttyAMA0 放最後 (沒有顯示卡, tty0 看不到; 序列埠接終端機才看得到狀態和緊急 shell)
+  #   加: console=ttyAMA0 console=tty0 (QEMU virt 的名稱固定: ttyAMA0 = PL011 序列埠, tty0 = kernel VT)。
+  #       最後一個 console= 才是 /dev/console, 這裡 tty0 放最後: 把 /dev/console 指到序列埠 (--headless 想在序列埠看到 systemd
+  #       狀態行) 實測會讓開機慢約 0.8 秒, 所以不這樣做; login 仍然兩邊都有 (serial-getty@ttyAMA0 + getty@tty1), kernel 訊息也兩邊都印。
   _cl=""
   set -f                      # 下面用不加引號的 $CMDLINE 拆字, 關掉萬用字元展開避免 * ? [ 被當檔名
   for _w in $CMDLINE; do
@@ -123,8 +122,9 @@ if [ "$OPT_DIRECT" = "1" ]; then
   done
   set +f
   [ "$USE_INITRD" = "1" ] || _cl=" root=$ROOTDEV rootwait$_cl"
-  if [ "$OPT_HEADLESS" = "1" ]; then CMDLINE="${_cl# } console=tty0 console=ttyAMA0"
-  else CMDLINE="${_cl# } console=ttyAMA0 console=tty0"; fi
+  #   加: systemd.tty.term.ttyAMA0=xterm-256color: serial-getty 沒有設 TERM 時 agetty 會用 vt220 (沒有顏色);
+  #       這個參數只改序列埠, tty1 仍是 linux (用 systemd.setenv=TERM=... 會連 tty1 一起改)
+  CMDLINE="${_cl# } console=ttyAMA0 console=tty0 systemd.tty.term.ttyAMA0=xterm-256color"
   if [ "$OPT_DRY" != "1" ]; then
     for f in "$KERNEL" ${INITRD:+"$INITRD"}; do [ -f "$f" ] || { echo "找不到 $f" >&2; exit 1; }; done
   fi
