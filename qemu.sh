@@ -13,7 +13,7 @@
 #        --zoom        縮放視窗         --mic       加麥克風 (macOS 會詢問權限)
 #        --no-share    這次不共享資料夾   --tpm       啟用軟體 TPM (目前 HVF 下會當掉)
 #        --headless    不開視窗 (ssh / X11 轉發用; 關機請在 VM 裡 sudo poweroff)
-#        --direct      直接載入 kernel 開機, 略過 UEFI/GRUB (先跑一次 extract; 或在 qemu.conf 自行設 KERNEL/INITRD/CMDLINE)
+#        --direct      直接載入 kernel 開機, 略過 UEFI/GRUB, 也不用 initrd (先跑一次 extract; 或在 qemu.conf 自行設 KERNEL/ROOTDEV; 開機參數的底設 CMDLINE; 要用 initrd 就設 INITRD)
 #                      流程: ./qemu.sh <os> install  ->  ./qemu.sh <os> extract  ->  ./qemu.sh <os> --direct
 #                      VM 裡升級 kernel 後要重跑 extract, 否則 --direct 還是開舊的 kernel
 #        --dry-run    只印出 QEMU 參數, 不啟動                   -h, --help  顯示說明
@@ -70,7 +70,7 @@ FW_CODE=/opt/homebrew/share/qemu/edk2-aarch64-code.fd
 FW_VARS_TEMPLATE=/opt/homebrew/share/qemu/edk2-arm-vars.fd
 TPM_DIR=tpm
 DIRECT_DIR=direct                 # extract 的輸出資料夾 (相對於 <os>/qemu/): Image、initrd.img、cmdline
-KERNEL=""; INITRD=""; CMDLINE=""  # 只在 --direct 使用; 沒設定就用 $DIRECT_DIR 裡 extract 取出的 (qemu.conf 設了就以 conf 為準)
+KERNEL=""; INITRD=""; ROOTDEV=""; CMDLINE=""  # 只在 --direct 使用; 沒設定就用 $DIRECT_DIR 裡 extract 取出的 (CMDLINE 是開機參數的底, console= 由腳本附加)
 
 cd "$OS/qemu"
 # shellcheck disable=SC1091
@@ -79,10 +79,10 @@ if [ -n "$OPT_RES" ]; then XRES="${OPT_RES%x*}"; YRES="${OPT_RES#*x}"; fi   # --
 
 [ -n "$DISK" ] || { echo "$OS/qemu/qemu.conf 沒有設定 DISK" >&2; exit 1; }
 # --- extract: 不開機, 直接從磁碟離線取出 kernel / initrd / 開機參數 (給 --direct 用) ---
-# 實作在共用的 _extract.sh (vfkit.sh 也用它); 這裡的磁碟是 qcow2, 主控台是 PL011 序列埠 (ttyAMA0)。
+# 實作在共用的 _extract.sh (vfkit.sh 也用它); 這裡的磁碟是 qcow2。
 if [ "$MODE" = "extract" ]; then
   [ -f "$DISK" ] || { echo "找不到磁碟 $OS/qemu/$DISK; 第一次請先  ./qemu.sh $OS install" >&2; exit 1; }
-  "$ROOT/_extract.sh" qcow2 "$PWD/$DISK" "$PWD/$DIRECT_DIR" ttyAMA0
+  "$ROOT/_extract.sh" qcow2 "$PWD/$DISK" "$PWD/$DIRECT_DIR"
   echo "下一步: ./qemu.sh $OS --direct   (VM 裡升級 kernel 後要重跑  ./qemu.sh $OS extract)"
   exit 0
 fi
@@ -92,13 +92,41 @@ if [ "$OPT_DIRECT" = "1" ]; then
   [ "$MODE" != "install" ] || { echo "--direct 不能搭配 install (安裝要走 UEFI 才能從光碟開機)" >&2; exit 1; }
   # qemu.conf 沒設定的項目, 用 extract 取出的檔案補上
   if [ -z "$KERNEL" ] && [ -f "$DIRECT_DIR/Image" ]; then KERNEL="$DIRECT_DIR/Image"; fi
-  if [ -z "$INITRD" ] && [ -f "$DIRECT_DIR/initrd.img" ]; then INITRD="$DIRECT_DIR/initrd.img"; fi
+  # 開機參數的底: qemu.conf 的 CMDLINE, 沒設就用 extract 取出的原始值 (GRUB 那行, 一個字都沒改)
   if [ -z "$CMDLINE" ]; then
-    if [ -f "$DIRECT_DIR/cmdline" ]; then CMDLINE="$(cat "$DIRECT_DIR/cmdline")"; else CMDLINE="console=ttyAMA0 quiet"; fi
+    if [ -f "$DIRECT_DIR/cmdline" ]; then CMDLINE="$(cat "$DIRECT_DIR/cmdline")"; else CMDLINE="ro"; fi
   fi
-  [ -n "$KERNEL" ] && [ -n "$INITRD" ] || { echo "--direct 找不到 kernel/initrd: 先跑  ./qemu.sh $OS extract  (或在 $OS/qemu/qemu.conf 設定 KERNEL 和 INITRD)" >&2; exit 1; }
+  [ -n "$KERNEL" ] || { echo "--direct 找不到 kernel: 先跑  ./qemu.sh $OS extract  (或在 $OS/qemu/qemu.conf 設定 KERNEL)" >&2; exit 1; }
+  # 預設不用 initrd (kernel 內建 virtio-blk/ext4, 掛根分割不需要它; 省約 1.3 秒); qemu.conf 設了 INITRD 才會載入
+  USE_INITRD=0; [ -z "$INITRD" ] || USE_INITRD=1
+  if [ "$USE_INITRD" = "0" ]; then
+    [ "$DISK_BUS" = "virtio-blk" ] || { echo "--direct 不用 initrd 只支援 virtio-blk (nvme 驅動是模組); 請在 qemu.conf 設定 INITRD" >&2; exit 1; }
+    # 沒有 initrd 就沒人解析 root=UUID=, 改用根分割的 PARTUUID (qemu.conf 可設 ROOTDEV 蓋掉; 預設是 extract 取出的 direct/rootdev)
+    if [ -z "$ROOTDEV" ] && [ -f "$DIRECT_DIR/rootdev" ]; then ROOTDEV="$(cat "$DIRECT_DIR/rootdev")"; fi
+    [ -n "$ROOTDEV" ] || { echo "--direct 不用 initrd 需要根分割資訊: 先(重新)跑  ./qemu.sh $OS extract  (或在 qemu.conf 設定 ROOTDEV 或 INITRD)" >&2; exit 1; }
+  fi
+  # 把開機參數的底 (GRUB 原始值) 依這次的開機方式增刪修:
+  #   刪: crashkernel= (kdump 在這沒用)、splash / vt.handoff / $變數 (GRUB 圖形開機畫面用, 直接開機不會展開)、console= (下面重附)
+  #   改: 沒有 initrd 時 root= 換成根分割 PARTUUID + rootwait (沒人解析 UUID)
+  #   加: console= 依模式附加。QEMU virt 的名稱固定: ttyAMA0 = PL011 序列埠 (virt 一定有), tty0 = kernel VT (有顯示卡才看得到)
+  #       最後一個 console= 才是 /dev/console:
+  #         有視窗: tty0 放最後 (視窗看得到 systemd 狀態和 login)
+  #         無視窗: ttyAMA0 放最後 (沒有顯示卡, tty0 看不到; 序列埠接終端機才看得到狀態和緊急 shell)
+  _cl=""
+  set -f                      # 下面用不加引號的 $CMDLINE 拆字, 關掉萬用字元展開避免 * ? [ 被當檔名
+  for _w in $CMDLINE; do
+    case "$_w" in
+      crashkernel=*|splash|vt.handoff*|\$*|console=*) ;;
+      root=*) [ "$USE_INITRD" = "1" ] && _cl="$_cl $_w" ;;
+      *) _cl="$_cl $_w" ;;
+    esac
+  done
+  set +f
+  [ "$USE_INITRD" = "1" ] || _cl=" root=$ROOTDEV rootwait$_cl"
+  if [ "$OPT_HEADLESS" = "1" ]; then CMDLINE="${_cl# } console=tty0 console=ttyAMA0"
+  else CMDLINE="${_cl# } console=ttyAMA0 console=tty0"; fi
   if [ "$OPT_DRY" != "1" ]; then
-    for f in "$KERNEL" "$INITRD"; do [ -f "$f" ] || { echo "找不到 $f" >&2; exit 1; }; done
+    for f in "$KERNEL" ${INITRD:+"$INITRD"}; do [ -f "$f" ] || { echo "找不到 $f" >&2; exit 1; }; done
   fi
 elif [ ! -f "$VARS" ]; then
   cp "$FW_VARS_TEMPLATE" "$VARS"     # 直接開機不用 UEFI, 所以不建立 vars.fd
@@ -280,7 +308,7 @@ BOOT_ARGS=(
   -drive if=pflash,format=raw,unit=1,file="$VARS"
 )
 if [ "$OPT_DIRECT" = "1" ]; then
-  BOOT_ARGS=(-kernel "$KERNEL" -initrd "$INITRD" -append "$CMDLINE")
+  BOOT_ARGS=(-kernel "$KERNEL" ${INITRD:+-initrd "$INITRD"} -append "$CMDLINE")
   # 無視窗時把終端機接上序列埠 (kernel 要有 console=ttyAMA0), 否則看不到任何開機訊息
   if [ "$OPT_HEADLESS" = "1" ]; then BOOT_ARGS+=(-serial mon:stdio); fi
 fi

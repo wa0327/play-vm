@@ -61,7 +61,7 @@ CPUS=4; MEMORY_MB=4096
 XRES=1920; YRES=1200
 MAC=""
 SHARES=()
-DIRECT_DIR=direct                  # extract 的輸出資料夾 (相對於 <os>/vfkit/): Image、initrd.img、cmdline
+DIRECT_DIR=direct                  # extract 的輸出資料夾 (相對於 <os>/vfkit/): Image、initrd.img、cmdline (GRUB 原始值)
 KERNEL=""; INITRD=""; CMDLINE=""   # 只在 --direct 使用; 沒設定就用 $DIRECT_DIR 裡 extract 取出的 (vfkit.conf 設了就以 conf 為準; CMDLINE 不能含逗號)
 cd "$OS/vfkit"
 # shellcheck disable=SC1091
@@ -82,14 +82,14 @@ if [ "$MODE" = "ip" ]; then
 fi
 
 # --- extract: 不開機, 直接從磁碟離線取出 kernel / initrd / 開機參數 (給 --direct 用) ---
-# 實作在共用的 _extract.sh (qemu.sh 也用它); 這裡的磁碟是 raw (直接讀, 不用轉換), 主控台是 virtio-serial (hvc0)。
+# 實作在共用的 _extract.sh (qemu.sh 也用它); 這裡的磁碟是 raw (直接讀, 不用轉換)。
 # raw 磁碟沒有檔案鎖, VM 還在跑時讀到的內容可能不一致, 所以先擋下。
 if [ "$MODE" = "extract" ]; then
   [ -f "$DISK" ] || { echo "找不到磁碟 $OS/vfkit/$DISK; 第一次請先  ./vfkit.sh $OS install" >&2; exit 1; }
   if [ -f vfkit.pid ] && kill -0 "$(cat vfkit.pid)" 2>/dev/null; then
     echo "$NAME 還在執行 (pid $(cat vfkit.pid)), 請先在 VM 裡關機再 extract" >&2; exit 1
   fi
-  "$ROOT/_extract.sh" raw "$PWD/$DISK" "$PWD/$DIRECT_DIR" hvc0
+  "$ROOT/_extract.sh" raw "$PWD/$DISK" "$PWD/$DIRECT_DIR"
   echo "下一步: ./vfkit.sh $OS --direct   (VM 裡升級 kernel 後要重跑  ./vfkit.sh $OS extract)"
   exit 0
 fi
@@ -101,9 +101,20 @@ if [ "$OPT_DIRECT" = "1" ]; then
   # vfkit.conf 沒設定的項目, 用 extract 取出的檔案補上
   if [ -z "$KERNEL" ] && [ -f "$DIRECT_DIR/Image" ]; then KERNEL="$DIRECT_DIR/Image"; fi
   if [ -z "$INITRD" ] && [ -f "$DIRECT_DIR/initrd.img" ]; then INITRD="$DIRECT_DIR/initrd.img"; fi
+  # 開機參數的底: vfkit.conf 的 CMDLINE, 沒設就用 extract 取出的原始值 (GRUB 那行, 一個字都沒改)
   if [ -z "$CMDLINE" ]; then
-    if [ -f "$DIRECT_DIR/cmdline" ]; then CMDLINE="$(cat "$DIRECT_DIR/cmdline")"; else CMDLINE="console=hvc0 quiet"; fi
+    if [ -f "$DIRECT_DIR/cmdline" ]; then CMDLINE="$(cat "$DIRECT_DIR/cmdline")"; else CMDLINE="ro"; fi
   fi
+  # 增刪修:
+  #   刪: crashkernel= (含逗號, 而且 kdump 在這沒用)、splash / vt.handoff / $變數 (GRUB 圖形開機畫面用, 直接開機不會展開)、console= (下面重附)
+  #   加: console= 依模式附加。hvc0 = virtio-serial (--headless 接終端機), tty0 = kernel VT (有視窗, virtio-gpu 才看得到)
+  #       最後一個 console= 才是 /dev/console: 有視窗 tty0 放最後, 無視窗 hvc0 放最後
+  _cl=""
+  for _w in $CMDLINE; do
+    case "$_w" in crashkernel=*|splash|vt.handoff*|\$*|console=*) ;; *) _cl="$_cl $_w" ;; esac
+  done
+  if [ "$OPT_HEADLESS" = "1" ]; then CMDLINE="${_cl# } console=tty0 console=hvc0"
+  else CMDLINE="${_cl# } console=hvc0 console=tty0"; fi
   [ -n "$KERNEL" ] && [ -n "$INITRD" ] || { echo "--direct 找不到 kernel/initrd: 先跑  ./vfkit.sh $OS extract  (或在 $OS/vfkit/vfkit.conf 設定 KERNEL 和 INITRD)" >&2; exit 1; }
   case "$CMDLINE" in *,*) echo "CMDLINE 不能含逗號 (vfkit 以逗號分隔選項): $CMDLINE" >&2; exit 1 ;; esac
   if [ "$OPT_DRY" != "1" ]; then
