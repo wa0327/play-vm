@@ -106,25 +106,25 @@ if [ "$OPT_DIRECT" = "1" ]; then
     [ -n "$ROOTDEV" ] || { echo "--direct 不用 initrd 需要根分割資訊: 先(重新)跑  ./qemu.sh $OS extract  (或在 qemu.conf 設定 ROOTDEV 或 INITRD)" >&2; exit 1; }
   fi
   # 把開機參數的底 (GRUB 原始值) 依這次的開機方式增刪修:
-  #   刪: crashkernel= (kdump 在這沒用)、splash / vt.handoff / $變數 (GRUB 圖形開機畫面用, 直接開機不會展開)、console= (下面重附)
+  #   刪: crashkernel= (kdump 在這沒用)、splash / quiet / vt.handoff / $變數 (GRUB 圖形開機畫面用, 直接開機不會展開; quiet 下面重附)、console= (下面重附)
   #   改: 沒有 initrd 時 root= 換成根分割 PARTUUID + rootwait (沒人解析 UUID)
-  #   加: console=ttyAMA0 console=tty0 (QEMU virt 的名稱固定: ttyAMA0 = PL011 序列埠, tty0 = kernel VT)。
-  #       最後一個 console= 才是 /dev/console, 這裡 tty0 放最後: 把 /dev/console 指到序列埠 (--headless 想在序列埠看到 systemd
-  #       狀態行) 實測會讓開機慢約 0.8 秒, 所以不這樣做; login 仍然兩邊都有 (serial-getty@ttyAMA0 + getty@tty1), kernel 訊息也兩邊都印。
+  #   加: console= 依模式只設一個 (QEMU virt 的名稱固定: ttyAMA0 = PL011 序列埠, tty0 = kernel VT):
+  #         有視窗 (cocoa + virtio-gpu): console=tty0    -> kernel 訊息和 systemd 狀態都顯示在視窗
+  #         --headless (沒有顯示卡):     console=ttyAMA0 -> 顯示在序列埠 (stdio 終端機); tty0 沒人看得到所以不設
+  #       只有一個 console= 時它就是 /dev/console; 沒設的那個裝置 (tty1 或 ttyAMA0) 仍然在, 只是不收 kernel 訊息
   _cl=""
   set -f                      # 下面用不加引號的 $CMDLINE 拆字, 關掉萬用字元展開避免 * ? [ 被當檔名
   for _w in $CMDLINE; do
     case "$_w" in
-      crashkernel=*|splash|vt.handoff*|\$*|console=*) ;;
+      crashkernel=*|splash|quiet|vt.handoff*|\$*|console=*) ;;
       root=*) [ "$USE_INITRD" = "1" ] && _cl="$_cl $_w" ;;
       *) _cl="$_cl $_w" ;;
     esac
   done
   set +f
   [ "$USE_INITRD" = "1" ] || _cl=" root=$ROOTDEV rootwait$_cl"
-  #   加: systemd.tty.term.ttyAMA0=xterm-256color: serial-getty 沒有設 TERM 時 agetty 會用 vt220 (沒有顏色);
-  #       這個參數只改序列埠, tty1 仍是 linux (用 systemd.setenv=TERM=... 會連 tty1 一起改)
-  CMDLINE="${_cl# } console=ttyAMA0 console=tty0 systemd.tty.term.ttyAMA0=xterm-256color"
+  if [ "$OPT_HEADLESS" = "1" ]; then _con="console=ttyAMA0"; else _con="console=tty0"; fi
+  CMDLINE="${_cl# } quiet $_con"     # quiet: kernel 只印警告以上, systemd 不印 [  OK  ] 狀態行 (少輸出到 console)
   if [ "$OPT_DRY" != "1" ]; then
     for f in "$KERNEL" ${INITRD:+"$INITRD"}; do [ -f "$f" ] || { echo "找不到 $f" >&2; exit 1; }; done
   fi

@@ -107,14 +107,15 @@ if [ "$OPT_DIRECT" = "1" ]; then
   fi
   # 增刪修:
   #   刪: crashkernel= (含逗號, 而且 kdump 在這沒用)、splash / vt.handoff / $變數 (GRUB 圖形開機畫面用, 直接開機不會展開)、console= (下面重附)
-  #   加: console=hvc0 console=tty0 (hvc0 = virtio-serial, tty0 = kernel VT)。最後一個 console= 才是 /dev/console, tty0 放最後
-  #       (沿用 qemu.sh 的取捨: 把 /dev/console 指到序列埠會讓開機變慢, 所以不這樣做; login 兩邊都有)
+  #   加: console= 依模式附加 (hvc0 = virtio-serial, tty0 = kernel VT)。kernel 的 printk 會印到所有 console=;
+  #       只有「最後一個」才是 /dev/console (systemd 狀態行、緊急 shell 只送到它):
+  #         有視窗 (virtio-gpu): tty0 放最後; --headless (沒有顯示卡): hvc0 放最後 (同 qemu.sh 的取捨: 看得到進度, 但會慢一點)
   _cl=""
   for _w in $CMDLINE; do
-    case "$_w" in crashkernel=*|splash|vt.handoff*|\$*|console=*) ;; *) _cl="$_cl $_w" ;; esac
+    case "$_w" in crashkernel=*|splash|quiet|vt.handoff*|\$*|console=*) ;; *) _cl="$_cl $_w" ;; esac
   done
-  #   加: systemd.tty.term.hvc0=xterm-256color: serial-getty 沒有設 TERM 時 agetty 會用 vt220 (沒有顏色); 只改 hvc0, tty1 不動
-  CMDLINE="${_cl# } console=hvc0 console=tty0 systemd.tty.term.hvc0=xterm-256color"
+  if [ "$OPT_HEADLESS" = "1" ]; then _con="console=tty0 console=hvc0"; else _con="console=hvc0 console=tty0"; fi
+  CMDLINE="${_cl# } quiet $_con"     # quiet: kernel 只印警告以上, systemd 不印 [  OK  ] 狀態行
   [ -n "$KERNEL" ] && [ -n "$INITRD" ] || { echo "--direct 找不到 kernel/initrd: 先跑  ./vfkit.sh $OS extract  (或在 $OS/vfkit/vfkit.conf 設定 KERNEL 和 INITRD)" >&2; exit 1; }
   case "$CMDLINE" in *,*) echo "CMDLINE 不能含逗號 (vfkit 以逗號分隔選項): $CMDLINE" >&2; exit 1 ;; esac
   if [ "$OPT_DRY" != "1" ]; then
