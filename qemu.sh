@@ -155,7 +155,12 @@ if [ "$OPT_DIRECT" = "1" ]; then
   else
     _con="$_con systemd.tty.term.console=$_term systemd.tty.rows.console=$_rows systemd.tty.columns.console=$_cols systemd.unit=multi-user.target"
   fi
-  CMDLINE="${_cl# } quiet $_con"     # quiet: kernel 只印警告以上, systemd 不印 [  OK  ] 狀態行 (少輸出到 console)
+  # sysctl.kernel.printk=4: kernel 在執行 init 之前就把 console 轉印等級降到 4 (跟 guest 的 systemd-sysctl 設的一樣)。
+  #   沒有 initrd 時, 真正的 systemd 一啟動就把日誌寫進 kmsg, 而 systemd-sysctl 要約 0.36 秒才套用 printk=4,
+  #   之前的日誌會被 kernel 轉印到 console, 跟 [  OK  ] 狀態行重複混在一起。提早套用後: kernel 訊息在前、systemd 狀態行在後,
+  #   不重複不混雜, journal 照常保留 (kernel 後段的訊息不印到 console, 仍在 dmesg 裡)。
+  #   不用 systemd.log_level=notice: [  OK  ] 狀態行與那份日誌同一個函式、同為 LOG_INFO 送出, 會一起消失。
+  CMDLINE="${_cl# } sysctl.kernel.printk=4 $_con"
   if [ "$OPT_DRY" != "1" ]; then
     for f in "$KERNEL" ${INITRD:+"$INITRD"}; do [ -f "$f" ] || { echo "找不到 $f" >&2; exit 1; }; done
   fi
