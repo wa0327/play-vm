@@ -12,9 +12,10 @@
 # 選項:  --res 寬x高   解析度, 例如 --res 1440x900 (預設見 qemu.conf)
 #        --zoom        縮放視窗         --mic       加麥克風 (macOS 會詢問權限)
 #        --no-share    這次不共享資料夾   --tpm       啟用軟體 TPM (目前 HVF 下會當掉)
-#        --display     開視窗 (-display cocoa) 並加顯示卡 (virtio-gpu); guest 的 tty0/tty1 顯示在視窗
-#                      不加 --display 就沒有視窗。序列埠 (guest 的 ttyAMA0) 一律接到這個終端機 (-serial mon:stdio), 在這裡登入;
-#                      Ctrl-A c 切到 QEMU monitor, Ctrl-A x 結束 (在 guest 按 Ctrl-C 不會殺掉 VM)
+#        --graphical   開視窗 (-display cocoa) 並加顯示卡 (virtio-gpu), guest 的 tty0/tty1 顯示在視窗, 開機目標用 guest 自己的預設 (graphical:
+#                      有顯示卡時會起 GNOME 桌面, guest 約多用 1.5 GB)。預設是省記憶體的模式: 不開視窗、不加顯示卡、開機目標 multi-user,
+#                      只用序列埠 (guest 的 ttyAMA0) 在這個終端機操作。兩種模式序列埠都一律接到這個終端機 (-serial mon:stdio),
+#                      在這裡登入; Ctrl-A c 切到 QEMU monitor, Ctrl-A x 結束 (在 guest 按 Ctrl-C 不會殺掉 VM)
 #        --no-direct   強制走 UEFI/GRUB 開機。預設是直接載入 kernel (略過 UEFI/GRUB, 也不用 initrd), 條件: 有 <os>/qemu/direct/ 資料夾
 #                      (只限一般開機, 不加模式)。資料夾由 extract 產生; 也可在 qemu.conf 自行設 KERNEL/ROOTDEV, 開機參數的底設 CMDLINE, 要用 initrd 就設 INITRD
 #                      流程: ./qemu.sh <os> install  ->  ./qemu.sh <os> extract  ->  ./qemu.sh <os>
@@ -37,16 +38,12 @@ OPT_DISPLAY=0; OPT_ZOOM=off; OPT_MIC=0; OPT_SHARE=1; OPT_TPM=0; OPT_DRY=0; OPT_R
 POS=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --display)  OPT_DISPLAY=1 ;;
-    --gui)      echo "--gui 已改名為 --display" >&2; exit 1 ;;
-    --tty)      echo "--tty 已移除: 序列埠預設就接到這個終端機" >&2; exit 1 ;;
-    --headless) echo "--headless 已移除: 不加 --display 就是無視窗, 序列埠預設就接到這個終端機" >&2; exit 1 ;;
+    --graphical) OPT_DISPLAY=1 ;;
     --zoom)     OPT_ZOOM=on ;;
     --mic)      OPT_MIC=1 ;;
     --no-share) OPT_SHARE=0 ;;
     --tpm)      OPT_TPM=1 ;;
     --dry-run)  OPT_DRY=1 ;;
-    --direct)   echo "--direct 已移除: 有 direct/ 資料夾就預設直接開機 (先跑 extract); 要走 UEFI/GRUB 請加 --no-direct" >&2; exit 1 ;;
     --no-direct) OPT_NODIRECT=1 ;;
     --res)      shift; OPT_RES="${1:-}" ;;
     --res=*)    OPT_RES="${1#--res=}" ;;
@@ -123,7 +120,7 @@ if [ "$OPT_DIRECT" = "1" ]; then
   #   加: console= 與終端機參數 (QEMU virt 的名稱固定: ttyAMA0 = PL011 序列埠, tty0 = kernel VT)。
   #       kernel 訊息會印到所有 console=; 最後一個才是 /dev/console (systemd 狀態行、緊急 shell 只送到它)。
   #         預設 (無視窗):  console=ttyAMA0            -> 序列埠, 在這個終端機
-  #         --display:     console=ttyAMA0 console=tty0 -> /dev/console 是視窗, 序列埠上仍有 kernel 訊息和登入
+  #         --graphical:   console=ttyAMA0 console=tty0 -> /dev/console 是視窗, 序列埠上仍有 kernel 訊息和登入
   #       為什麼要明確給終端機型號與大小: 序列埠上的 systemd 沒被告知時會「問終端機」(XTGETTCAP 查型號、DSR 查大小),
   #       每次最多等 333 毫秒; 序列埠沒有人回答 (或回答很慢) 就白等 (實測 PID 1 一次 + 各服務的大小查詢, 共約 0.7 秒)。
   #       console=tty0 時 /dev/console 是 VT, systemd 直接知道是 linux, 不用問。
@@ -149,10 +146,14 @@ if [ "$OPT_DIRECT" = "1" ]; then
     xterm-256color|xterm|screen-256color|screen|tmux-256color|tmux|linux|vt220) _term="$TERM" ;;
     *) _term=xterm-256color ;;       # guest 不一定有 host 這個型號的 terminfo
   esac
-  # 序列埠的 getty (ttyAMA0) 一定要給; /dev/console 也是序列埠時 (沒有 --display) 還要給 console 的
+  # 序列埠的 getty (ttyAMA0) 一定要給; /dev/console 也是序列埠時 (預設, 無視窗) 還要給 console 的
   _con="$_con systemd.tty.term.ttyAMA0=$_term systemd.tty.rows.ttyAMA0=$_rows systemd.tty.columns.ttyAMA0=$_cols"
-  if [ "$OPT_DISPLAY" != "1" ]; then
-    _con="$_con systemd.tty.term.console=$_term systemd.tty.rows.console=$_rows systemd.tty.columns.console=$_cols"
+  # 開機目標明確指定 (不依賴 guest 自己的預設): 有顯示卡時 graphical.target 會把整個 GNOME 桌面帶起來
+  # (實測 guest 已用記憶體約 1.96 GB, 對 multi-user 的約 0.46 GB), 所以無視窗時用 multi-user (也不起 gdm)
+  if [ "$OPT_DISPLAY" = "1" ]; then
+    _con="$_con systemd.unit=graphical.target"
+  else
+    _con="$_con systemd.tty.term.console=$_term systemd.tty.rows.console=$_rows systemd.tty.columns.console=$_cols systemd.unit=multi-user.target"
   fi
   CMDLINE="${_cl# } quiet $_con"     # quiet: kernel 只印警告以上, systemd 不印 [  OK  ] 狀態行 (少輸出到 console)
   if [ "$OPT_DRY" != "1" ]; then
@@ -198,14 +199,14 @@ if [ -n "$MODE" ]; then
   case " $RAMFB_MODES " in *" $MODE "*) GPU_ARGS=(-device ramfb) ;; esac
 fi
 if [ "$MODE" = "bochs" ]; then GPU_ARGS=(-device bochs-display); fi
-# --display: 開視窗 (cocoa) 並加顯示卡; 沒給就不開視窗、不加顯示卡 (-display 只決定畫面顯示在哪, 顯示卡由 -device 決定)
+# 預設不開視窗、不加顯示卡; --graphical 開視窗 (cocoa) 並加顯示卡 (-display 只決定畫面顯示在哪, 顯示卡由 -device 決定)
 DISPLAY_ARG="cocoa,zoom-to-fit=$OPT_ZOOM"
 if [ "$OPT_DISPLAY" != "1" ]; then GPU_ARGS=(); DISPLAY_ARG="none"; fi
 # 序列埠一律接到這個終端機: -serial mon:stdio (monitor 疊在同一條線上, Ctrl-A c 切換; 不用純 stdio, 因為純 stdio 時在 guest 按 Ctrl-C 會殺掉整台 VM)
 SERIAL_ARGS=(-serial mon:stdio)
-# 這些模式需要看畫面 (安裝/裝驅動/救援顯示), 沒給 --display 就會是看不到畫面的 VM
+# 這些模式需要看畫面 (安裝/裝驅動/救援顯示), 沒加 --graphical 就會是看不到畫面的 VM
 case "$MODE" in install|drivers|net|safe|bochs)
-  [ "$OPT_DISPLAY" = "1" ] || echo "警告: $MODE 模式需要看畫面, 請加 --display" >&2 ;;
+  [ "$OPT_DISPLAY" = "1" ] || echo "警告: $MODE 模式需要看畫面, 請加 --graphical" >&2 ;;
 esac
 
 # --- 共享資料夾 (SMB, 只在這次啟動有效) ---
@@ -350,7 +351,9 @@ fi
 QEMU=(qemu-system-aarch64)
 if [ "$OPT_DRY" = "1" ]; then QEMU=(printf '%s\n'); fi
 
-"${QEMU[@]}" \
+# MallocLargeCache=0: 關掉 macOS libmalloc 的大區塊快取。-kernel 載入時讀檔的 72 MB buffer 釋放後會被這個快取留住
+# (vmmap 裡的 "Malloc Large (empty)"), 關掉後 QEMU 的 footprint 少約 70-80 MB; 實測開機時間不受影響。
+MallocLargeCache=0 "${QEMU[@]}" \
   -name "$NAME" \
   -machine virt,highmem=on \
   -accel hvf \
