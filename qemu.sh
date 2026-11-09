@@ -135,6 +135,8 @@ if [ "$OPT_DIRECT" = "1" ]; then
   done
   set +f
   [ "$USE_INITRD" = "1" ] || _cl=" root=$ROOTDEV rootwait$_cl"
+  # 直接開機的 VM 不需要 AppArmor: kernel 不啟用, apparmor.service 因 ConditionSecurity=apparmor 自動跳過 (省約 80 毫秒, 且它在 local-fs 之後擋住 sysinit)
+  case " $_cl " in *" apparmor="*) ;; *) _cl="$_cl apparmor=0" ;; esac
   _con="console=ttyAMA0"; [ "$OPT_DISPLAY" != "1" ] || _con="console=ttyAMA0 console=tty0"
   # 序列埠接的是這個終端機: 量它的大小、型號餵給 systemd (只在啟動當下量一次; 取不到 (不是終端機) 就用 24x80 / xterm-256color)
   _rows=24; _cols=80
