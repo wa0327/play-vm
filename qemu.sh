@@ -62,7 +62,7 @@ case "$MODE" in ""|install|drivers|net|safe|bochs|extract) ;; *) echo "未知模
 
 # --- 預設值 (qemu.conf 可覆蓋) ---
 NAME="$OS"
-DISK=""; DISK_BUS=virtio-blk; DISK_OPTS=",discard=unmap"   # discard=unmap: 客體 TRIM 會真的還空間給 Mac (conf 設 DISK_OPTS="" 可關閉)
+DISK=""; DISK_FORMAT=qcow2; DISK_BUS=virtio-blk; DISK_OPTS=",discard=unmap"   # discard=unmap: 客體 TRIM 會真的還空間給 Mac (conf 設 DISK_OPTS="" 可關閉)
 VARS=""
 INSTALL_ISO=""; DRIVERS_ISO=""
 RAM=8G; CPUS=10
@@ -89,10 +89,10 @@ if [ "$OPT_NODIRECT" = "0" ] && [ -z "$MODE" ] && [ -d "$DIRECT_DIR" ]; then
   echo "提示: 找到 $OS/qemu/$DIRECT_DIR/, 直接載入 kernel 開機 (要走 UEFI/GRUB 請加 --no-direct)" >&2
 fi
 # --- extract: 不開機, 直接從磁碟離線取出 kernel / initrd / 開機參數 (直接開機用) ---
-# 實作在共用的 _extract.sh (vfkit.sh 也用它); 這裡的磁碟是 qcow2。
+# 實作在共用的 _extract.sh (vfkit.sh 也用它); 磁碟格式由 conf 的 DISK_FORMAT 決定 (qcow2 或 raw)。
 if [ "$MODE" = "extract" ]; then
   [ -f "$DISK" ] || { echo "找不到磁碟 $OS/qemu/$DISK; 第一次請先  ./qemu.sh $OS install" >&2; exit 1; }
-  "$ROOT/_extract.sh" qcow2 "$PWD/$DISK" "$PWD/$DIRECT_DIR"
+  "$ROOT/_extract.sh" "$DISK_FORMAT" "$PWD/$DISK" "$PWD/$DIRECT_DIR"
   echo "下一步: ./qemu.sh $OS   (VM 裡升級 kernel 後要重跑  ./qemu.sh $OS extract)"
   exit 0
 fi
@@ -343,7 +343,9 @@ fi
 if [ "$DISK_BUS" = "nvme" ]; then
   DISK_DEV="nvme,drive=hd0,serial=${NAME}disk,bootindex=2"
 else
-  DISK_DEV="virtio-blk-pci,drive=hd0,bootindex=2"
+  # iothread: 磁碟 I/O 獨立執行緒處理, 不佔用 QEMU 主迴圈 (BQL), 降低每次請求的延遲
+  # num-queues: 每個 vCPU 子集一條佇列, 多核併發 I/O 不互搶
+  DISK_DEV="virtio-blk-pci,drive=hd0,iothread=io0,num-queues=4,bootindex=2"
 fi
 
 # --- 開機方式: 有 direct/ 資料夾預設直接載入 kernel; --no-direct 或沒有資料夾就走 UEFI (pflash) ---
@@ -374,7 +376,8 @@ MallocLargeCache=0 "${QEMU[@]}" \
   -device qemu-xhci \
   -device usb-kbd \
   -device usb-tablet \
-  -drive if=none,id=hd0,format=qcow2,file="$DISK$DISK_OPTS" \
+  -object iothread,id=io0 \
+  -drive if=none,id=hd0,format="$DISK_FORMAT",file="$DISK$DISK_OPTS" \
   -device "$DISK_DEV" \
   -netdev "$NETDEV" \
   -device virtio-net-pci,netdev=net0 \
