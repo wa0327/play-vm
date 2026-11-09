@@ -65,7 +65,7 @@ NAME="$OS"
 DISK=""; DISK_BUS=virtio-blk; DISK_OPTS=",discard=unmap"   # discard=unmap: 客體 TRIM 會真的還空間給 Mac (conf 設 DISK_OPTS="" 可關閉)
 VARS=""
 INSTALL_ISO=""; DRIVERS_ISO=""
-RAM=4G; CPUS=4
+RAM=8G; CPUS=10
 XRES=1920; YRES=1200
 RAMFB_MODES=""
 SHARES=()
