@@ -49,10 +49,13 @@ systemctl disable $TIMERS $SERVICES 2>/dev/null || true
 # 隨機數: 早期載入 virtio_rng (見上面說明)
 mkdir -p /etc/modules-load.d
 echo virtio_rng > "$RNG"
+# 電源鍵: vz 的 requestStop / Cmd-Q 靠 gpio_keys 才收得到 (模組, 不載入 guest 就不會關機)
+echo gpio_keys >> "$RNG"
 
 # 網路: networkd 取代 NetworkManager (先寫好設定再切換, 切換在重開機後才生效)
+# ClientIdentifier=mac: 租約用 MAC 登記 (預設 DUID, macOS 的 dhcpd_leases 就查不到 MAC, vz.sh ip 與埠轉發都靠它)
 mkdir -p /etc/systemd/network
-printf '[Match]\nType=ether\n\n[Network]\nDHCP=yes\n' > "$NET"
+printf '[Match]\nType=ether\n\n[Network]\nDHCP=yes\n\n[DHCPv4]\nClientIdentifier=mac\n' > "$NET"
 systemctl disable NetworkManager NetworkManager-wait-online NetworkManager-dispatcher 2>/dev/null || true
 systemctl enable systemd-networkd systemd-resolved
 echo "完成; 重開機後生效 (量測: systemd-analyze critical-chain serial-getty@ttyAMA0.service)"
