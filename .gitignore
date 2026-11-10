@@ -27,3 +27,6 @@ share/*
 
 # --direct 用的 kernel/initrd (./qemu.sh <os> extract 從磁碟取出, 很大且可重新產生, 不進版本控制)
 direct/
+
+# Swift 編譯輸出
+.build/
