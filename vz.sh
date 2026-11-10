@@ -72,17 +72,31 @@ if [ "$MODE" = "ip" ]; then
   echo "$ip"; exit 0
 fi
 
-# --- 編譯與簽章 (原始碼比 binary 新才重編) ---
+# --- 磁碟使用中檢查: lsof 要約 50 毫秒, 放背景跟後面的步驟重疊 ---
+LSOF_PID=""
+if [ "$OPT_DRY" != "1" ] && [ -f "$DISK" ]; then
+  LSOF_OUT="$(mktemp)"
+  lsof -t -- "$DISK" >"$LSOF_OUT" 2>/dev/null &
+  LSOF_PID=$!
+fi
+
+# --- 編譯與簽章 (只在需要時; 用標記檔 .signed 記住「編譯過且簽過」, 比對用 shell 內建的 -nt, 不開新程序) ---
 BIN="$ROOT/vz/.build/release/vz"
+STAMP="$ROOT/vz/.build/.signed"
 if [ "$OPT_DRY" != "1" ]; then
-  if [ ! -x "$BIN" ] || [ -n "$(find "$ROOT/vz/Sources" "$ROOT/vz/Package.swift" -newer "$BIN" -print -quit)" ]; then
+  need=0
+  { [ -x "$BIN" ] && [ -f "$STAMP" ]; } || need=1
+  [ "$BIN" -nt "$STAMP" ] && need=1                      # binary 被重編過 (簽章會消失)
+  for f in "$ROOT"/vz/Package.swift "$ROOT"/vz/vz.entitlements "$ROOT"/vz/Sources/vz/*.swift; do
+    [ "$f" -nt "$STAMP" ] && need=1
+  done
+  if [ "$need" = 1 ]; then
     echo "編譯 vz ..." >&2
     (cd "$ROOT/vz" && swift build -c release 2>&1 | grep -E 'error|warning: unre|Compiling|Build complete' >&2) || true
     [ -x "$BIN" ] || { echo "編譯失敗" >&2; exit 1; }
-  fi
-  # 簽章: 沒有 com.apple.security.virtualization entitlement, VZ 會拒絕啟動 (重新編譯後簽章會消失, 所以每次檢查)
-  if ! codesign -d --entitlements - "$BIN" 2>&1 | grep -q 'com.apple.security.virtualization'; then
+    # 沒有 com.apple.security.virtualization entitlement, VZ 會拒絕啟動
     codesign --force --sign - --entitlements "$ROOT/vz/vz.entitlements" "$BIN" >&2
+    touch "$STAMP"
   fi
 fi
 
@@ -94,11 +108,11 @@ if [ ! -f "$DISK" ]; then
     echo "找不到磁碟 $OS/vz/$DISK; 第一次請用  ./vz.sh $OS install" >&2; exit 1
   fi
 fi
-if [ "$OPT_DRY" != "1" ] && [ -f "$DISK" ]; then
+if [ -n "$LSOF_PID" ]; then
   # raw 磁碟沒有檔案鎖: 任何程序 (qemu、vfkit、另一個 vz) 已開著就擋下, 避免毀掉檔案系統
-  if _p="$(lsof -t -- "$DISK" 2>/dev/null)" && [ -n "$_p" ]; then
-    echo "磁碟 $DISK 已被程序使用中 (pid: $(echo $_p)), 不啟動" >&2; exit 1
-  fi
+  wait "$LSOF_PID" || true
+  _p="$(cat "$LSOF_OUT")"; rm -f "$LSOF_OUT"
+  if [ -n "$_p" ]; then echo "磁碟 $DISK 已被程序使用中 (pid: $(echo $_p)), 不啟動" >&2; exit 1; fi
 fi
 if [ "$MODE" = "install" ]; then
   [ -n "$INSTALL_ISO" ] && [ -f "$INSTALL_ISO" ] || { echo "找不到安裝光碟: ${INSTALL_ISO:-(INSTALL_ISO 未設定)}" >&2; exit 1; }

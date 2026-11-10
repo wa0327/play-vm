@@ -138,17 +138,19 @@ func makeConfiguration(_ o: Options) throws -> VZVirtualMachineConfiguration {
     }
     c.directorySharingDevices = fsDevices
 
-    // 音效 (輸出; --mic 加輸入, macOS 會詢問權限)
-    let sound = VZVirtioSoundDeviceConfiguration()
-    let out = VZVirtioSoundDeviceOutputStreamConfiguration()
-    out.sink = VZHostAudioOutputStreamSink()
-    sound.streams = [out]
-    if o.mic {
-        let inp = VZVirtioSoundDeviceInputStreamConfiguration()
-        inp.source = VZHostAudioInputStreamSource()
-        sound.streams.append(inp)
+    // 音效 (輸出; --mic 加輸入, macOS 會詢問權限)。無視窗又沒要麥克風時不加: 少探測一個裝置, guest 也少跑 alsa 相關單元
+    if o.gui || o.mic {
+        let sound = VZVirtioSoundDeviceConfiguration()
+        let out = VZVirtioSoundDeviceOutputStreamConfiguration()
+        out.sink = VZHostAudioOutputStreamSink()
+        sound.streams = [out]
+        if o.mic {
+            let inp = VZVirtioSoundDeviceInputStreamConfiguration()
+            inp.source = VZHostAudioInputStreamSource()
+            sound.streams.append(inp)
+        }
+        c.audioDevices = [sound]
     }
-    c.audioDevices = [sound]
 
     // 顯示與輸入 (只有 --gui)
     if o.gui {
