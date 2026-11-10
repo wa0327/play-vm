@@ -16,11 +16,15 @@
 #   停用 fstrim / man-db / logrotate / apt-daily / apt-daily-upgrade 的 timer
 #                                        開機時鐘會從映像檔的時間跳到真實時間, Persistent 的 timer 以為錯過排程, 每次開機都補跑
 #                                        注意: 關掉 fstrim 後 guest 不會把刪除的空間還給 Mac, 要回收請手動 sudo fstrim -av
+#   開機早期載入 virtio_rng               vz.sh (Virtualization.framework) 不像 QEMU 在 device tree 給 rng-seed, 隨機數池要等 udev 才載入
+#                                        virtio_rng 後才初始化; systemd-random-seed 與 systemd-resolved 各卡約 0.5 秒 (QEMU 只要 6 / 40 毫秒),
+#                                        systemd-modules-load 在 0.25 秒就載入它; vz 開機 1.17 -> 0.55 秒 (QEMU 不受影響, 加了也無害)
 # AppArmor 不在這裡: 由 qemu.sh 直接開機的 cmdline 加 apparmor=0, 單元因 ConditionSecurity 自動跳過。
 set -euo pipefail
 [ "$(id -u)" = 0 ] || { echo "要用 root 執行 (sudo bash -s)" >&2; exit 1; }
 
 NET=/etc/systemd/network/10-ether.network
+RNG=/etc/modules-load.d/virtio-rng.conf
 TIMERS="fstrim.timer man-db.timer logrotate.timer apt-daily.timer apt-daily-upgrade.timer"
 MASKS="systemd-binfmt.service netplan-configure.service rtkit-daemon.service systemd-oomd.service systemd-oomd.socket"
 SERVICES="systemd-oomd.service unattended-upgrades.service"
@@ -29,7 +33,7 @@ if [ "${1:-}" = "undo" ]; then
   sed -i '\#^[^\#].*[[:space:]]/boot/efi[[:space:]]#s/noauto,nofail/defaults/' /etc/fstab
   systemctl unmask $MASKS
   systemctl enable $TIMERS $SERVICES
-  rm -f "$NET"
+  rm -f "$NET" "$RNG"
   systemctl disable systemd-networkd 2>/dev/null || true
   systemctl enable NetworkManager NetworkManager-wait-online NetworkManager-dispatcher 2>/dev/null || true
   echo "已還原 (netplan 設定沒動過); 重開機後生效"
@@ -41,6 +45,10 @@ sed -i '\#^[^\#].*[[:space:]]/boot/efi[[:space:]]#s/[[:space:]]defaults[[:space:
 
 systemctl mask $MASKS
 systemctl disable $TIMERS $SERVICES 2>/dev/null || true
+
+# 隨機數: 早期載入 virtio_rng (見上面說明)
+mkdir -p /etc/modules-load.d
+echo virtio_rng > "$RNG"
 
 # 網路: networkd 取代 NetworkManager (先寫好設定再切換, 切換在重開機後才生效)
 mkdir -p /etc/systemd/network
