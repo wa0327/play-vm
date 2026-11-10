@@ -56,6 +56,7 @@ CPUS=10; MEMORY_MB=8192
 XRES=1920; YRES=1200
 MAC=""
 SHARES=()
+HOSTFWD=()
 DIRECT_DIR=direct
 KERNEL=""; INITRD=""; ROOTDEV=""; CMDLINE=""
 cd "$OS/vz"
@@ -182,6 +183,11 @@ if [ "$OPT_SHARE" = "1" ]; then
     ARGS+=(--share "$entry"); echo "共享: ${entry%%:*}  (guest: sudo mount -t virtiofs ${entry%%:*} /mnt/${entry%%:*})" >&2
   done
 fi
+# 埠轉發 (Mac 127.0.0.1 -> VM): VZ 的 NAT 沒有內建, 由 vz 程式開 TCP 轉發器; 格式 "本機埠:VM埠", 需要 MAC
+for rule in ${HOSTFWD[@]+"${HOSTFWD[@]}"}; do
+  [ -n "$MAC" ] || { echo "HOSTFWD 需要 vz.conf 設定 MAC" >&2; exit 1; }
+  ARGS+=(--forward "$rule")
+done
 [ -z "$MAC" ] || [ "$OPT_DRY" = "1" ] || echo "提示: 開機後用  ./vz.sh $OS ip  查 IP" >&2
 
 if [ "$OPT_DRY" = "1" ]; then printf '%s\n' "$BIN" "${ARGS[@]}"; exit 0; fi

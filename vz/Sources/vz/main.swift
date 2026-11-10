@@ -3,7 +3,8 @@
 // 用法 (通常由 vz.sh 呼叫):
 //   vz --disk PATH --cpus N --memory-mb N
 //      (--kernel PATH [--initrd PATH] --cmdline STR | --efi-vars PATH)
-//      [--cdrom ISO] [--mac MAC] [--share 標籤:路徑[:ro]]... [--gui --width W --height H]
+//      [--cdrom ISO] [--mac MAC] [--share 標籤:路徑[:ro]]... [--forward 本機埠:VM埠]... [--gui --width W --height H]
+// --forward: VZ 的 NAT 沒有埠轉發, 這裡在 127.0.0.1 開 TCP 轉發器; 每次連線用 --mac 從 /var/db/dhcpd_leases 查 guest 當下的 IP。
 // 無 --gui: 終端機接 guest 的 hvc0 (virtio console); Ctrl-A x 強制結束, Ctrl-A Ctrl-A 送出一個 Ctrl-A。
 // 有 --gui: 開視窗; hvc0 一樣接終端機。
 import AppKit
@@ -27,6 +28,7 @@ struct Options {
     var width = 1920
     var height = 1200
     var mic = false
+    var forwards: [(host: UInt16, guest: UInt16)] = []
 }
 
 func die(_ msg: String) -> Never {
@@ -60,6 +62,10 @@ func parseArgs() -> Options {
         case "--height": o.height = intValue(a)
         case "--gui": o.gui = true
         case "--mic": o.mic = true
+        case "--forward":
+            let parts = value(a).split(separator: ":").compactMap { UInt16($0) }
+            guard parts.count == 2 else { die("--forward 格式: 本機埠:VM埠") }
+            o.forwards.append((parts[0], parts[1]))
         case "--share":
             let parts = value(a).split(separator: ":", omittingEmptySubsequences: false).map(String.init)
             guard parts.count >= 2 else { die("--share 格式: 標籤:路徑[:ro]") }
@@ -68,6 +74,7 @@ func parseArgs() -> Options {
         }
     }
     if o.disk.isEmpty { die("缺少 --disk") }
+    if !o.forwards.isEmpty && o.mac == nil { die("--forward 需要 --mac (用來查 guest IP)") }
     if o.kernel == nil && o.efiVars == nil { die("要給 --kernel (直接開機) 或 --efi-vars (UEFI)") }
     return o
 }
@@ -205,6 +212,80 @@ func setupTerminal(onForceQuit: @escaping () -> Void) {
     }
 }
 
+// MARK: - 埠轉發 (Mac 127.0.0.1 -> guest NAT IP)
+
+/// 從 macOS 的 dhcpd_leases 找 MAC 對應的最新 IP (該檔省略 MAC 每一段的前導零)
+func guestIP(mac: String) -> String? {
+    guard let text = try? String(contentsOfFile: "/var/db/dhcpd_leases", encoding: .utf8) else { return nil }
+    let short = mac.lowercased().split(separator: ":").map { seg -> String in
+        let t = seg.drop(while: { $0 == "0" }); return t.isEmpty ? "0" : String(t)
+    }.joined(separator: ":")
+    var found: String?
+    for block in text.components(separatedBy: "}") where block.contains("hw_address=1,\(short)\n") {
+        for line in block.split(separator: "\n") {
+            let l = line.trimmingCharacters(in: .whitespaces)
+            if l.hasPrefix("ip_address=") { found = String(l.dropFirst("ip_address=".count)) }
+        }
+    }
+    return found
+}
+
+func connectTCP(ip: String, port: UInt16) -> Int32? {
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    guard fd >= 0 else { return nil }
+    var a = sockaddr_in()
+    a.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    a.sin_family = sa_family_t(AF_INET)
+    a.sin_port = port.bigEndian
+    guard inet_pton(AF_INET, ip, &a.sin_addr) == 1 else { close(fd); return nil }
+    let r = withUnsafePointer(to: &a) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
+    if r != 0 { close(fd); return nil }
+    return fd
+}
+
+func pump(from: Int32, to: Int32) {
+    var buf = [UInt8](repeating: 0, count: 65536)
+    while true {
+        let n = read(from, &buf, buf.count)
+        if n <= 0 { break }
+        var off = 0
+        while off < n {
+            let w = buf.withUnsafeBytes { write(to, $0.baseAddress! + off, n - off) }
+            if w <= 0 { shutdown(from, SHUT_RD); shutdown(to, SHUT_WR); return }
+            off += w
+        }
+    }
+    shutdown(to, SHUT_WR)
+}
+
+func startForwarder(hostPort: UInt16, guestPort: UInt16, mac: String) {
+    let ls = socket(AF_INET, SOCK_STREAM, 0)
+    guard ls >= 0 else { return }
+    var one: Int32 = 1
+    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
+    var a = sockaddr_in()
+    a.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    a.sin_family = sa_family_t(AF_INET)
+    a.sin_port = hostPort.bigEndian
+    a.sin_addr.s_addr = inet_addr("127.0.0.1")
+    let ok = withUnsafePointer(to: &a) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(ls, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
+    guard ok == 0, listen(ls, 16) == 0 else {
+        FileHandle.standardError.write(Data("略過轉發 \(hostPort): 本機埠已被占用\n".utf8)); close(ls); return
+    }
+    FileHandle.standardError.write(Data("轉發: 127.0.0.1:\(hostPort) -> VM \(guestPort)\n".utf8))
+    Thread.detachNewThread {
+        while true {
+            let c = accept(ls, nil, nil)
+            if c < 0 { continue }
+            Thread.detachNewThread {
+                guard let ip = guestIP(mac: mac), let g = connectTCP(ip: ip, port: guestPort) else { close(c); return }
+                Thread.detachNewThread { pump(from: g, to: c); close(g); close(c) }
+                pump(from: c, to: g)
+            }
+        }
+    }
+}
+
 // MARK: - 執行
 
 final class Delegate: NSObject, VZVirtualMachineDelegate, NSApplicationDelegate, NSWindowDelegate {
@@ -244,6 +325,7 @@ do { config = try makeConfiguration(opts) } catch { die("設定無效: \(error)"
 vm = VZVirtualMachine(configuration: config)
 vm.delegate = delegate
 setupTerminal(onForceQuit: forceStop)
+for f in opts.forwards { startForwarder(hostPort: f.host, guestPort: f.guest, mac: opts.mac!) }
 
 // SIGTERM / SIGHUP: 請 guest 正常關機
 signal(SIGTERM, SIG_IGN); signal(SIGHUP, SIG_IGN)
