@@ -10,7 +10,7 @@
 #                                        改用 Type=ether 比對, 不寫死網卡名稱 (PCI 槽位變動時 enpXsY 會變)
 #   mask netplan-configure               networkd 直接讀 /etc/systemd/network, 不經 netplan (開機時 30~90 毫秒)
 #   mask rtkit-daemon                    VM 不需要即時排程提權, 少一個常駐服務 (polkit 不能 mask: 否則進不了 GNOME 桌面)
-#   mask systemd-oomd                    只 disable 擋不住: user@.service 的 drop-in 用 Wants= 把它拉起來 (自動登入一開 session 就啟動),
+#   mask systemd-oomd                    只 disable 擋不住: user@.service 的 drop-in 用 Wants= 把它拉起來 (使用者一開 session 就啟動),
 #                                        每次開機背景占用約 0.7 秒 (blame 上很大, 不在 login 路徑上); 代價: 沒有 swap 時不再由 oomd 提早處理記憶體不足
 #   停用 unattended-upgrades              少一個常駐服務 (代價: 不自動裝安全更新, 要自己 apt upgrade)
 #   停用 fstrim / man-db / logrotate / apt-daily / apt-daily-upgrade 的 timer
