@@ -5,7 +5,7 @@
 //      (--kernel PATH [--initrd PATH] --cmdline STR | --efi-vars PATH)
 //      [--cdrom ISO] [--mac MAC] [--share 標籤:路徑[:ro]]... [--forward 本機埠:VM埠]... [--gui --width W --height H]
 // --forward: VZ 的 NAT 沒有埠轉發, 這裡在 127.0.0.1 開 TCP 轉發器; 每次連線用 --mac 從 /var/db/dhcpd_leases 查 guest 當下的 IP。
-// 無 --gui: 終端機接 guest 的 hvc0 (virtio console); Ctrl-A x 強制結束, Ctrl-A Ctrl-A 送出一個 Ctrl-A。
+// 無 --gui: 終端機接 guest 的 hvc0 (virtio console); Ctrl-A p 請 guest 正常關機, Ctrl-A x 強制結束, Ctrl-A Ctrl-A 送出一個 Ctrl-A。
 // 有 --gui: 開視窗; hvc0 一樣接終端機。
 import AppKit
 import Foundation
@@ -182,7 +182,7 @@ func restoreTerminal() {
     if termiosSaved { tcsetattr(STDIN_FILENO, TCSANOW, &savedTermios); termiosSaved = false }
 }
 
-func setupTerminal(onForceQuit: @escaping () -> Void) {
+func setupTerminal(onForceQuit: @escaping () -> Void, onGracefulStop: @escaping () -> Void) {
     if isatty(STDIN_FILENO) != 0 {
         tcgetattr(STDIN_FILENO, &savedTermios)
         termiosSaved = true
@@ -201,6 +201,7 @@ func setupTerminal(onForceQuit: @escaping () -> Void) {
             if sawCtrlA {
                 sawCtrlA = false
                 if b == UInt8(ascii: "x") { DispatchQueue.main.async(execute: onForceQuit); return }
+                if b == UInt8(ascii: "p") { DispatchQueue.main.async(execute: onGracefulStop); return }
                 if b == 0x01 { out.append(0x01) } else { out.append(0x01); out.append(b) }
             } else if b == 0x01 {
                 sawCtrlA = true
@@ -324,7 +325,7 @@ let config: VZVirtualMachineConfiguration
 do { config = try makeConfiguration(opts) } catch { die("設定無效: \(error)") }
 vm = VZVirtualMachine(configuration: config)
 vm.delegate = delegate
-setupTerminal(onForceQuit: forceStop)
+setupTerminal(onForceQuit: forceStop, onGracefulStop: requestGuestStop)
 for f in opts.forwards { startForwarder(hostPort: f.host, guestPort: f.guest, mac: opts.mac!) }
 
 // SIGTERM / SIGHUP: 請 guest 正常關機
