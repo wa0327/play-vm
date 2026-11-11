@@ -9,7 +9,7 @@
 #        --res 寬x高   解析度 (預設見 vz.conf)         --mic   加麥克風 (macOS 會詢問權限)
 #        --no-share   這次不共享資料夾                 --efi   強制走 UEFI/GRUB (預設有 <os> 的 direct/ 資料夾就直接開機)
 #        --dry-run    只印出參數, 不啟動                -h, --help  顯示說明
-# 終端機接 guest 的 hvc0 (virtio console): Ctrl-A x 強制結束 (等於斷電), 在 guest 按 Ctrl-C 不會殺掉 VM。
+# 終端機接 guest 的 hvc0 (virtio console): Ctrl-A p 請 guest 正常關機 (等於按電源鍵), Ctrl-A x 強制結束 (等於斷電), 在 guest 按 Ctrl-C 不會殺掉 VM。
 # 視窗模式下 Cmd-Q / 關視窗 = 請 guest 正常關機。kill (SIGTERM) 同理。
 # 直接開機的 kernel 用 ./qemu.sh <os> extract 產生 (或在 vz.conf 設 KERNEL/ROOTDEV/CMDLINE/INITRD)。
 set -euo pipefail
@@ -143,13 +143,13 @@ if [ "$DIRECT" = "1" ]; then
   set -f
   for _w in $CMDLINE; do
     case "$_w" in
-      crashkernel=*|splash|quiet|vt.handoff*|\$*|console=*) ;;
+      crashkernel=*|splash|quiet|vt.handoff*|\$*|console=*|ro|rw) ;;
       root=*) [ -z "$INITRD" ] || _cl="$_cl $_w" ;;
       *) _cl="$_cl $_w" ;;
     esac
   done
   set +f
-  [ -n "$INITRD" ] || _cl=" root=$ROOTDEV rootwait$_cl"
+  [ -n "$INITRD" ] || _cl=" root=$ROOTDEV rootwait rw$_cl"
   case " $_cl " in *" apparmor="*) ;; *) _cl="$_cl apparmor=0" ;; esac
   # 終端機大小與型號餵給 systemd, 免得它在序列埠上等回應
   _rows=24; _cols=80
